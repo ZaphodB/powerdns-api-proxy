@@ -23,6 +23,12 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
 Impersonation: `X-Impersonate-Teilnehmer` — ADM only, journaled with both
 identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
 
+The webui act-as token is additionally **bound to configured source IPs**
+(`webui_source_ips`): on the WireGuard overlay, cryptokey routing makes peer
+source IPs unforgeable, so the token is unusable from any host but the UI
+host even if leaked. A global mutation rate cap applies across all act-as
+traffic on top of per-member limits.
+
 ## Endpoints
 
 | Method | Path | Auth | Notes |
@@ -41,7 +47,7 @@ identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
 | POST | `/proxy/v1/journal/{id}/resolve` | ADM | finalize an uncertain row (`{"status": "committed"|"failed"}`), audited |
 | POST | `/proxy/v1/register` | REG/ADM | `{zone, teilnehmer}` → create zone from configured template (kind + nameservers, SOA synthesized by pdns) + mapping entry, journaled against the Teilnehmer; `409` zone owned or exists upstream, `403` deny-set, `501` template unconfigured; returns `{zone, teilnehmer, journal_id, mapping_generation}` (`mapping_generation: null` = zone created but mapping update failed — exporter heals) |
 | GET | `/proxy/v1/keys` | TN | own keys: id, prefix, label, created_at, revoked_at |
-| POST | `/proxy/v1/keys` | TN (session: act-as or OIDC; **not** a key) | `{label}` → `{id, key}` — plaintext exactly once |
+| POST | `/proxy/v1/keys` | TN **OIDC session only** (admin impersonation now, member OIDC later; act-as and keys → 403) | `{label}` → `{id, key}` — plaintext exactly once. Act-as minting removed 2026-07-15 (luna review): a compromised UI host must not mint persistent per-member credentials |
 | DELETE | `/proxy/v1/keys/{id}` | TN/ADM | revoke; TN only own |
 | GET | `/proxy/v1/whoami` | any authenticated | `{kind, actor, effective_teilnehmer, is_admin, impersonator, webui_user}` |
 | GET | `/proxy/v1/health` | none | liveness only, no internals |

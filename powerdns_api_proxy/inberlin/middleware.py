@@ -46,8 +46,17 @@ def _error(status: int, detail: str) -> JSONResponse:
 
 
 class RateLimiter:
-    def __init__(self, failures_per_minute: int, mutations_per_minute: int):
-        self.limits = {"auth": failures_per_minute, "mutation": mutations_per_minute}
+    def __init__(
+        self,
+        failures_per_minute: int,
+        mutations_per_minute: int,
+        webui_global_mutations_per_minute: int = 600,
+    ):
+        self.limits = {
+            "auth": failures_per_minute,
+            "mutation": mutations_per_minute,
+            "webui-global": webui_global_mutations_per_minute,
+        }
         self.events: dict[tuple[str, str], deque] = defaultdict(deque)
 
     def hit(self, bucket: str, key: str) -> bool:
@@ -93,6 +102,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
         limiter: RateLimiter = getattr(request.app.state, "inberlin_limiter", None) or RateLimiter(
             runtime.settings.rate_limit_auth_failures_per_minute,
             runtime.settings.rate_limit_mutations_per_minute,
+            runtime.settings.rate_limit_webui_global_mutations_per_minute,
         )
         request.app.state.inberlin_limiter = limiter
 
@@ -105,6 +115,13 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             if static_env is not None:
                 roles = runtime.env_roles(static_env.name)
                 if "webui" in roles and x_tn:
+                    allowed = runtime.settings.webui_source_ips
+                    client_ip = request.client.host if request.client else None
+                    if allowed and client_ip not in allowed:
+                        logger.warning(
+                            f"webui act-as token used from unauthorized source {client_ip}"
+                        )
+                        return _error(403, "webui token not valid from this source")
                     identity = Identity(
                         kind="webui-act-as",
                         actor=static_env.name,
@@ -186,6 +203,8 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             mut_key = identity.effective_teilnehmer or token_id
             if limiter.hit("mutation", mut_key):
                 return _error(429, "rate limited")
+            if identity.kind == "webui-act-as" and limiter.hit("webui-global", "webui"):
+                return _error(429, "rate limited (webui global)")
 
         id_token = current_identity.set(identity)
         env_token = current_environment.set(environment)

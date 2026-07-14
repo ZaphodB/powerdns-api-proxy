@@ -410,8 +410,13 @@ async def list_keys():
 async def create_key(body: KeyCreate):
     rt, identity = _runtime(), _identity()
     tn = _require_tn(identity)
-    if not identity.is_session:
-        raise HTTPException(403, "keys can only be minted from a session, not a key")
+    # Minting requires a strongly-authenticated OIDC session (admin
+    # impersonation now, member OIDC later). The shared webui act-as token
+    # deliberately cannot mint: a compromised UI host must not be able to
+    # create persistent per-member credentials that survive token rotation
+    # (luna review 2026-07-15).
+    if identity.kind != "oidc":
+        raise HTTPException(403, "key minting requires an OIDC session")
     plaintext, prefix, key_hash = generate_key()
     try:
         key_id = await rt.store.insert_key(

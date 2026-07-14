@@ -9,6 +9,7 @@ from tests.unit.inberlin.conftest import (
     PLAIN_TOKEN,
     REGISTRAR_TOKEN,
     WEBUI_TOKEN,
+    bearer,
 )
 
 ZONES_PATH = "/api/v1/servers/localhost/zones"
@@ -214,7 +215,13 @@ def test_zone_delete_rollback_recreates(client, fake_pdns):
 # -- keys -----------------------------------------------------------------------
 
 def test_key_mint_use_revoke_and_hygiene(client, tmp_path):
+    # act-as (shared webui token) may NOT mint — OIDC session required
     r = client.post("/proxy/v1/keys", headers=act_as("alice"), json={"label": "acme"})
+    assert r.status_code == 403
+    # admin impersonating alice via OIDC mints for her
+    r = client.post("/proxy/v1/keys",
+                    headers=bearer(admin=True, **{"X-Impersonate-Teilnehmer": "alice"}),
+                    json={"label": "acme"})
     assert r.status_code == 201
     plaintext = r.json()["key"]
     key_id = r.json()["id"]
@@ -242,7 +249,9 @@ def test_key_mint_use_revoke_and_hygiene(client, tmp_path):
 
 
 def test_key_journal_access_forbidden(client):
-    r = client.post("/proxy/v1/keys", headers=act_as("alice"), json={})
+    r = client.post("/proxy/v1/keys",
+                    headers=bearer(admin=True, **{"X-Impersonate-Teilnehmer": "alice"}),
+                    json={})
     plaintext = r.json()["key"]
     assert client.get("/proxy/v1/journal",
                       headers={"X-API-Key": plaintext}).status_code == 403
@@ -333,6 +342,23 @@ def test_register_501_when_unconfigured(client):
         assert r.status_code == 501
     finally:
         rt.settings.registration = saved
+
+
+# -- webui token binding ----------------------------------------------------------
+
+def test_webui_token_bound_to_source_ip(client):
+    import powerdns_api_proxy.inberlin.runtime as runtime_mod
+    rt = runtime_mod.get_runtime()
+    saved = rt.settings.webui_source_ips
+    # TestClient connects as "testclient"
+    rt.settings.webui_source_ips = ["192.168.254.9"]
+    try:
+        r = client.get(ZONES_PATH, headers=act_as("alice"))
+        assert r.status_code == 403
+        rt.settings.webui_source_ips = ["testclient"]
+        assert client.get(ZONES_PATH, headers=act_as("alice")).status_code == 200
+    finally:
+        rt.settings.webui_source_ips = saved
 
 
 # -- fail-closed journal ----------------------------------------------------------

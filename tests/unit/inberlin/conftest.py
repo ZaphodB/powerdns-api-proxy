@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from typing import Generator
 from unittest.mock import patch
 
@@ -12,7 +13,11 @@ from fastapi.testclient import TestClient
 
 import powerdns_api_proxy.inberlin.runtime as runtime_mod
 from powerdns_api_proxy.inberlin.runtime import Runtime
-from powerdns_api_proxy.inberlin.settings import InBerlinSettings, RegistrationSettings
+from powerdns_api_proxy.inberlin.settings import (
+    InBerlinSettings,
+    OIDCSettings,
+    RegistrationSettings,
+)
 from powerdns_api_proxy.models import ProxyConfig, ProxyConfigEnvironment, ProxyConfigZone
 
 WEBUI_TOKEN = "webui-secret-token"
@@ -61,7 +66,48 @@ def make_settings(tmp_path) -> InBerlinSettings:
         registration=RegistrationSettings(
             nameservers=["ns1.example.", "ns2.example."]
         ),
+        oidc=OIDCSettings(
+            issuer=OIDC_ISSUER, audience=OIDC_AUDIENCE, admin_group="dns-admins"
+        ),
     )
+
+
+OIDC_ISSUER = "https://auth.example/application/o/dnsapi/"
+OIDC_AUDIENCE = "dnsapi"
+_RSA_KEY = None
+
+
+def _rsa_key():
+    global _RSA_KEY
+    if _RSA_KEY is None:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        _RSA_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return _RSA_KEY
+
+
+def install_test_jwks(validator) -> None:
+    import jwt
+    public_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(
+        _rsa_key().public_key(), as_dict=True
+    )
+    public_jwk["kid"] = "test-kid"
+    validator._jwks = {"test-kid": jwt.PyJWK(dict(public_jwk, alg="RS256"))}
+    validator._fetched_at = time.monotonic()
+
+
+def bearer(sub: str = "user-123", admin: bool = False, **headers) -> dict:
+    """Authorization header with a valid OIDC token signed by the test key."""
+    import jwt
+    now = int(time.time())
+    claims = {
+        "iss": OIDC_ISSUER, "aud": OIDC_AUDIENCE, "sub": sub,
+        "iat": now, "exp": now + 300,
+        "preferred_username": sub,
+        "groups": ["dns-admins"] if admin else ["members"],
+    }
+    token = jwt.encode(claims, _rsa_key(), algorithm="RS256",
+                       headers={"kid": "test-kid"})
+    return {"Authorization": f"Bearer {token}", **headers}
 
 
 class FakeResponse:
@@ -168,6 +214,7 @@ def client(tmp_path, fake_pdns) -> Generator[TestClient, None, None]:
     config = make_config()
     settings = make_settings(tmp_path)
     rt = Runtime(settings)
+    install_test_jwks(rt.oidc)
     asyncio.run(rt.mapping.load())
     asyncio.run(
         rt.mapping.replace(0, {"alice": ["kunde.example"], "bob": ["bob.example"]}, "test-seed")
