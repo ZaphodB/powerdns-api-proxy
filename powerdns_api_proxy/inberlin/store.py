@@ -243,19 +243,29 @@ class Store:
     # -- api keys ---------------------------------------------------------
 
     async def insert_key(
-        self, teilnehmer: str, prefix: str, key_hash: str, label: str | None, via: str
+        self,
+        teilnehmer: str,
+        prefix: str,
+        key_hash: str,
+        label: str | None,
+        via: str,
+        max_keys: int,
     ) -> int:
+        """Inserts a key, enforcing the per-TN cap inside the same transaction
+        (a router-side pre-check alone would be a TOCTOU across two awaits)."""
         def run(c: sqlite3.Connection) -> int:
             count = c.execute(
                 "SELECT COUNT(*) AS n FROM api_key WHERE teilnehmer = ? AND revoked_at IS NULL",
                 (teilnehmer,),
             ).fetchone()["n"]
+            if count >= max_keys:
+                raise KeyLimitReached(count)
             cur = c.execute(
                 "INSERT INTO api_key (teilnehmer, key_prefix, key_hash, label, created_at, created_via)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (teilnehmer, prefix, key_hash, label, _utcnow(), via),
             )
-            return int(cur.lastrowid or 0) if count is not None else 0
+            return int(cur.lastrowid or 0)
         return await self._write(run)
 
     async def count_active_keys(self, teilnehmer: str) -> int:
@@ -453,6 +463,12 @@ class Store:
             page_size = c.execute("PRAGMA page_size").fetchone()[0]
             return page_count * page_size
         return await self._read(run)
+
+
+class KeyLimitReached(Exception):
+    def __init__(self, count: int):
+        self.count = count
+        super().__init__(f"active key limit reached ({count})")
 
 
 class GenerationMismatch(Exception):

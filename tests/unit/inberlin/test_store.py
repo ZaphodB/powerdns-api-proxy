@@ -52,7 +52,7 @@ def test_mapping_survives_restart(tmp_path):
 def test_key_lifecycle(store):
     plaintext, prefix, key_hash = generate_key()
     assert parse_prefix(plaintext) == prefix
-    run(store.insert_key("alice", prefix, key_hash, "lab", "webui-act-as"))
+    run(store.insert_key("alice", prefix, key_hash, "lab", "webui-act-as", 10))
     assert run(verify_key(store, plaintext)) == "alice"
     assert run(verify_key(store, plaintext + "x")) is None
     assert run(verify_key(store, "not-a-key")) is None
@@ -67,11 +67,27 @@ def test_key_lifecycle(store):
 
 def test_key_revoke_scoping(store):
     plaintext, prefix, key_hash = generate_key()
-    kid = run(store.insert_key("alice", prefix, key_hash, None, "oidc"))
+    kid = run(store.insert_key("alice", prefix, key_hash, None, "oidc", 10))
     keys = run(store.list_keys("alice"))
     kid = keys[0]["id"]
     assert not run(store.revoke_key(kid, "bob"))  # not bob's key
     assert run(store.revoke_key(kid, None))  # admin
+
+
+def test_key_cap_enforced_in_transaction(store):
+    import pytest
+    from powerdns_api_proxy.inberlin.store import KeyLimitReached
+
+    for _ in range(2):
+        plaintext, prefix, key_hash = generate_key()
+        run(store.insert_key("alice", prefix, key_hash, None, "oidc", 2))
+    plaintext, prefix, key_hash = generate_key()
+    with pytest.raises(KeyLimitReached):
+        run(store.insert_key("alice", prefix, key_hash, None, "oidc", 2))
+    # revoking frees a slot
+    keys = run(store.list_keys("alice"))
+    assert run(store.revoke_key(keys[0]["id"], "alice"))
+    run(store.insert_key("alice", prefix, key_hash, None, "oidc", 2))
 
 
 def test_journal_state_machine(store):

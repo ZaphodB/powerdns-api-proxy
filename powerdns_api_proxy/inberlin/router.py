@@ -17,7 +17,7 @@ from powerdns_api_proxy.inberlin.rollback import (
     check_drift,
 )
 from powerdns_api_proxy.inberlin.runtime import Runtime, get_runtime
-from powerdns_api_proxy.inberlin.store import GenerationMismatch
+from powerdns_api_proxy.inberlin.store import GenerationMismatch, KeyLimitReached
 from powerdns_api_proxy.logging import logger
 
 router = APIRouter(prefix="/proxy/v1", tags=["IN-Berlin Proxy"])
@@ -293,7 +293,13 @@ async def rollback_journal_entry(
         logger.exception("journal intent failed for rollback (fail-closed)")
         raise HTTPException(503, "journal unavailable, rollback refused")
 
-    resp = await pdns.request(method, path, payload=payload or {})
+    try:
+        resp = await pdns.request(method, path, payload=payload or {})
+    except BaseException:
+        # Same contract as JournalMiddleware: the mutation may have reached
+        # pdns — never leave the intent row pending.
+        await capture.mark_uncertain()
+        raise
     await capture.finalize(resp.status)
     if resp.status >= 400:
         raise HTTPException(502, f"upstream rejected rollback: {resp.status}")
@@ -319,10 +325,14 @@ async def create_key(body: KeyCreate):
     tn = _require_tn(identity)
     if not identity.is_session:
         raise HTTPException(403, "keys can only be minted from a session, not a key")
-    if await rt.store.count_active_keys(tn) >= rt.settings.max_keys_per_teilnehmer:
-        raise HTTPException(409, "key limit reached")
     plaintext, prefix, key_hash = generate_key()
-    key_id = await rt.store.insert_key(tn, prefix, key_hash, body.label, identity.kind)
+    try:
+        key_id = await rt.store.insert_key(
+            tn, prefix, key_hash, body.label, identity.kind,
+            rt.settings.max_keys_per_teilnehmer,
+        )
+    except KeyLimitReached:
+        raise HTTPException(409, "key limit reached")
     return JSONResponse(
         {"id": key_id, "key": plaintext, "prefix": prefix}, status_code=201
     )
