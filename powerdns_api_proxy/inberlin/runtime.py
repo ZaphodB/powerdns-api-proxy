@@ -27,6 +27,19 @@ class Runtime:
             OIDCValidator(settings.oidc) if settings.oidc else None
         )
         self._prune_task: Optional[asyncio.Task] = None
+        self._zone_locks: dict[str, asyncio.Lock] = {}
+
+    def zone_lock(self, zone: str) -> asyncio.Lock:
+        """Per-zone mutation lock. The journal's before/after capture is only
+        correct if intent → forward → finalize runs serialized per zone —
+        concurrent same-RRset writes would record stale before-states and a
+        later rollback would silently wipe the intervening change. Single
+        worker, so an asyncio.Lock suffices; entries are never evicted (zone
+        count is small and bounded)."""
+        lock = self._zone_locks.get(zone)
+        if lock is None:
+            lock = self._zone_locks[zone] = asyncio.Lock()
+        return lock
 
     async def start(self) -> None:
         """Load the mapping snapshot from SQLite and start the prune loop."""

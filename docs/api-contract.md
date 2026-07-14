@@ -45,7 +45,7 @@ traffic on top of per-member limits.
 | POST | `/proxy/v1/journal/{id}/rollback` | TN-session/ADM | `409` drift vs recorded after; body `{"force": true}` ADM-only; requires *current* authz on zone; returns new journal id |
 | GET | `/proxy/v1/journal/uncertain` | ADM | pending/uncertain rows + live upstream state for reconciliation |
 | POST | `/proxy/v1/journal/{id}/resolve` | ADM | finalize an uncertain row (`{"status": "committed"|"failed"}`), audited |
-| POST | `/proxy/v1/register` | REG/ADM | `{zone, teilnehmer}` → create zone from configured template (kind + nameservers, SOA synthesized by pdns) + mapping entry, journaled against the Teilnehmer; `409` zone owned or exists upstream, `403` deny-set, `501` template unconfigured; returns `{zone, teilnehmer, journal_id, mapping_generation}` (`mapping_generation: null` = zone created but mapping update failed — exporter heals) |
+| POST | `/proxy/v1/register` | REG/ADM | `{zone, teilnehmer}` → create zone from configured template (kind + nameservers, SOA synthesized by pdns) + mapping entry, journaled against the Teilnehmer; `409` zone owned or exists upstream, `403` deny-set, `501` template unconfigured; returns `{zone, teilnehmer, journal_id, mapping_generation}` (`mapping_generation: null` = zone created but mapping update failed — exporter heals; `409` "zone created but concurrently mapped to another Teilnehmer" = zone exists, mapping conflict needs resolution). Rolling back the zone-create (admin-only) deletes the zone but leaves the mapping entry — the next exporter full-replace heals it |
 | GET | `/proxy/v1/keys` | TN | own keys: id, prefix, label, created_at, revoked_at |
 | POST | `/proxy/v1/keys` | TN **OIDC session only** (admin impersonation now, member OIDC later; act-as and keys → 403) | `{label}` → `{id, key}` — plaintext exactly once. Act-as minting removed 2026-07-15 (luna review): a compromised UI host must not mint persistent per-member credentials |
 | DELETE | `/proxy/v1/keys/{id}` | TN/ADM | revoke; TN only own |
@@ -61,7 +61,7 @@ journal DB size gauge.
 
 PowerDNS-style body `{"error": "<detail>"}`:
 
-- `400` ambiguous/duplicate credentials, malformed identity header, missing If-Match
+- `400` ambiguous/duplicate credentials, conflicting identity headers (X-Teilnehmer + X-Impersonate-Teilnehmer), missing If-Match
 - `401` no/invalid credential
 - `403` credential class not allowed for endpoint/header, zone not owned, TN scope
 - `409` mapping/override generation mismatch; rollback drift

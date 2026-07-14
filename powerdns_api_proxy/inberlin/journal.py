@@ -120,7 +120,7 @@ class JournalCapture:
     def operation(self) -> str:
         return self.info["operation"]
 
-    def _zone_name(self) -> str:
+    def zone_name(self) -> str:
         """Canonical zone for the journal row; '.' when undeterminable."""
         if self.info["zone_id"]:
             return canonical_zone(self.info["zone_id"])
@@ -151,7 +151,7 @@ class JournalCapture:
             actor_kind=self.identity.kind,
             impersonator=self.identity.impersonator,
             webui_user=self.identity.webui_user,
-            zone=self._zone_name(),
+            zone=self.zone_name(),
             method=self.method,
             path=self.path,
             operation=self.operation,
@@ -174,12 +174,21 @@ class JournalCapture:
             logger.exception(f"could not mark journal entry {self.journal_id} uncertain")
 
     async def finalize(self, status_code: int) -> None:
-        """Post-GET after-state and settle the row: failed (>=400), committed,
+        """Post-GET after-state and settle the row: failed (4xx), uncertain
+        (5xx — the mutation may have applied before the error), committed,
         or uncertain if the post-GET/store write itself fails."""
         assert self.journal_id is not None
-        if status_code >= 400:
+        if 400 <= status_code < 500:
             await self.runtime.store.journal_finalize(
                 self.journal_id, status="failed", status_code=status_code,
+                after_state=None, rollbackable=False,
+            )
+            return
+        if status_code >= 500:
+            # A 5xx is as ambiguous as a transport error: pdns may have
+            # applied the change before failing. Surface for reconciliation.
+            await self.runtime.store.journal_finalize(
+                self.journal_id, status="uncertain", status_code=status_code,
                 after_state=None, rollbackable=False,
             )
             return
@@ -197,7 +206,7 @@ class JournalCapture:
             elif self.operation == "zone-delete":
                 rollbackable = self._before_zone is not None
             elif self.operation == "zone-create":
-                created = await fetch_zone(self.pdns, server, self._zone_name())
+                created = await fetch_zone(self.pdns, server, self.zone_name())
                 after_state = json.dumps(created) if created else None
                 rollbackable = created is not None
             await self.runtime.store.journal_finalize(

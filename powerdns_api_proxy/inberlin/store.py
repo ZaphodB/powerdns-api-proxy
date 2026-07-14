@@ -431,7 +431,8 @@ class Store:
             if where:
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY j.id DESC LIMIT ? OFFSET ?"
-            params += [min(limit, 1000), offset]
+            # clamp both ends: SQLite treats LIMIT -1 as unlimited
+            params += [max(1, min(limit, 1000)), max(0, offset)]
             return [dict(r) for r in c.execute(sql, params)]
         return await self._read(run)
 
@@ -449,17 +450,19 @@ class Store:
         return await self._write(run)
 
     async def journal_prune(self, retention_days: int) -> int:
-        """Delete settled entries older than the retention window; pending rows
-        are kept regardless of age (they still need reconciliation)."""
+        """Delete settled entries older than the retention window; pending AND
+        uncertain rows are kept regardless of age — both still need admin
+        reconciliation and must never age out silently."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
         def run(c: sqlite3.Connection) -> int:
             c.execute(
                 "DELETE FROM journal_rrset WHERE journal_id IN"
-                " (SELECT id FROM journal WHERE ts < ? AND status != 'pending')",
+                " (SELECT id FROM journal WHERE ts < ? AND status IN ('committed', 'failed'))",
                 (cutoff,),
             )
             cur = c.execute(
-                "DELETE FROM journal WHERE ts < ? AND status != 'pending'", (cutoff,)
+                "DELETE FROM journal WHERE ts < ? AND status IN ('committed', 'failed')",
+                (cutoff,),
             )
             return cur.rowcount
         return await self._write(run)

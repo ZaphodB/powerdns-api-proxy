@@ -108,6 +108,9 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             if len(request.headers.getlist(h)) > 1:
                 return _error(400, f"duplicate {h} header")
 
+        if x_tn and x_imp:
+            # reject-not-precedence-resolve: no credential class accepts both
+            return _error(400, "ambiguous identity headers: X-Teilnehmer and X-Impersonate-Teilnehmer")
         if api_key and bearer:
             return _error(400, "ambiguous credentials: X-API-Key and Bearer")
         if not api_key and not bearer:
@@ -275,20 +278,24 @@ class JournalMiddleware(BaseHTTPMiddleware):
         capture = JournalCapture(
             runtime, pdns, identity, request.method, request.url.path, info, body
         )
-        try:
-            await capture.intent(
-                rollback_of=getattr(request.state, "rollback_of", None)
-            )
-        except Exception:
-            logger.exception("journal intent failed — refusing mutation (fail-closed)")
-            return _error(503, "journal unavailable, mutation refused")
+        # Serialize intent → forward → finalize per zone: overlapping writes to
+        # the same zone would capture stale before/after states (see
+        # Runtime.zone_lock).
+        async with runtime.zone_lock(capture.zone_name()):
+            try:
+                await capture.intent(
+                    rollback_of=getattr(request.state, "rollback_of", None)
+                )
+            except Exception:
+                logger.exception("journal intent failed — refusing mutation (fail-closed)")
+                return _error(503, "journal unavailable, mutation refused")
 
-        try:
-            response = await call_next(request)
-        except BaseException:
-            # The mutation may already have reached pdns; never leave the row
-            # pending. Mark it uncertain for admin reconciliation, then re-raise.
-            await capture.mark_uncertain()
-            raise
-        await capture.finalize(response.status_code)
-        return response
+            try:
+                response = await call_next(request)
+            except BaseException:
+                # The mutation may already have reached pdns; never leave the row
+                # pending. Mark it uncertain for admin reconciliation, then re-raise.
+                await capture.mark_uncertain()
+                raise
+            await capture.finalize(response.status_code)
+            return response

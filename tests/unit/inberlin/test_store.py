@@ -136,3 +136,41 @@ def test_journal_resolve_uncertain(store):
     )
     assert run(store.journal_resolve(jid, "committed", "admin:x"))
     assert not run(store.journal_resolve(jid, "failed", "admin:x"))  # already resolved
+
+
+def _intent(store, status=None):
+    jid = run(
+        store.journal_intent(
+            teilnehmer=None, actor="x", actor_kind="static", impersonator=None,
+            webui_user=None, zone=".", method="POST", path="/p", operation="other",
+            raw_request=None, before_state=None,
+        )
+    )
+    if status:
+        run(
+            store.journal_finalize(
+                jid, status=status, status_code=200, after_state=None,
+                rollbackable=False,
+            )
+        )
+    return jid
+
+
+def test_journal_prune_keeps_pending_and_uncertain(store):
+    ids = {s: _intent(store, s) for s in ("committed", "failed", "uncertain")}
+    ids["pending"] = _intent(store)
+    # retention 0 days = everything is past the cutoff
+    run(store.journal_prune(0))
+    assert run(store.journal_get(ids["committed"])) is None
+    assert run(store.journal_get(ids["failed"])) is None
+    # unreconciled rows must never age out silently
+    assert run(store.journal_get(ids["uncertain"])) is not None
+    assert run(store.journal_get(ids["pending"])) is not None
+
+
+def test_journal_query_limit_clamped(store):
+    for _ in range(3):
+        _intent(store, "committed")
+    # SQLite treats LIMIT -1 as unlimited — the store must clamp
+    assert len(run(store.journal_query(limit=-1))) == 1
+    assert len(run(store.journal_query(limit=2))) == 2

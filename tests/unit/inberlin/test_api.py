@@ -34,6 +34,16 @@ def test_ambiguous_credentials_400(client):
     assert r.status_code == 400
 
 
+def test_conflicting_identity_headers_400(client):
+    # reject-not-precedence-resolve: both act-as forms together is ambiguous
+    r = client.get(ZONES_PATH, headers={
+        "X-API-Key": WEBUI_TOKEN,
+        "X-Teilnehmer": "alice",
+        "X-Impersonate-Teilnehmer": "bob",
+    })
+    assert r.status_code == 400
+
+
 def test_act_as_header_forbidden_for_plain_static(client):
     r = client.get(ZONES_PATH, headers={
         "X-API-Key": PLAIN_TOKEN, "X-Teilnehmer": "alice"})

@@ -281,10 +281,6 @@ async def rollback_journal_entry(
     from powerdns_api_proxy.proxy import pdns
     server_id = rt.settings.upstream_server_id
 
-    if entry["operation"] == "rrset-patch" and not body.force:
-        drift = await check_drift(pdns, server_id, entry["zone"], entry["rrsets"])
-        if drift:
-            raise HTTPException(409, "state drifted: " + "; ".join(drift))
     if entry["operation"] == "zone-create" and not identity.is_admin:
         raise HTTPException(403, "zone deletion rollback is admin-only")
 
@@ -297,20 +293,28 @@ async def rollback_journal_entry(
     info = classify(method, path)
     assert info is not None
     capture = JournalCapture(rt, pdns, identity, method, path, info, payload)
-    try:
-        await capture.intent(rollback_of=journal_id)
-    except Exception:
-        logger.exception("journal intent failed for rollback (fail-closed)")
-        raise HTTPException(503, "journal unavailable, rollback refused")
+    # Per-zone serialization, same as JournalMiddleware. The drift check must
+    # sit INSIDE the lock: a concurrent write between check and apply would
+    # make the rollback silently clobber it.
+    async with rt.zone_lock(canonical_zone(entry["zone"])):
+        if entry["operation"] == "rrset-patch" and not body.force:
+            drift = await check_drift(pdns, server_id, entry["zone"], entry["rrsets"])
+            if drift:
+                raise HTTPException(409, "state drifted: " + "; ".join(drift))
+        try:
+            await capture.intent(rollback_of=journal_id)
+        except Exception:
+            logger.exception("journal intent failed for rollback (fail-closed)")
+            raise HTTPException(503, "journal unavailable, rollback refused")
 
-    try:
-        resp = await pdns.request(method, path, payload=payload or {})
-    except BaseException:
-        # Same contract as JournalMiddleware: the mutation may have reached
-        # pdns — never leave the intent row pending.
-        await capture.mark_uncertain()
-        raise
-    await capture.finalize(resp.status)
+        try:
+            resp = await pdns.request(method, path, payload=payload or {})
+        except BaseException:
+            # Same contract as JournalMiddleware: the mutation may have reached
+            # pdns — never leave the intent row pending.
+            await capture.mark_uncertain()
+            raise
+        await capture.finalize(resp.status)
     if resp.status >= 400:
         raise HTTPException(502, f"upstream rejected rollback: {resp.status}")
     return {"rolled_back": journal_id, "journal_id": capture.journal_id}
@@ -358,23 +362,26 @@ async def register_zone(body: RegisterBody):
     # their own journal history; actor stays the registrar credential.
     journal_identity = dataclasses.replace(identity, effective_teilnehmer=tn)
     capture = JournalCapture(rt, pdns, journal_identity, "POST", path, info, payload)
-    try:
-        await capture.intent()
-    except Exception:
-        logger.exception("journal intent failed for register (fail-closed)")
-        raise HTTPException(503, "journal unavailable, registration refused")
-    try:
-        resp = await pdns.request("POST", path, payload=payload)
-    except BaseException:
-        await capture.mark_uncertain()
-        raise
-    await capture.finalize(resp.status)
+    # Per-zone serialization, same as JournalMiddleware.
+    async with rt.zone_lock(zone):
+        try:
+            await capture.intent()
+        except Exception:
+            logger.exception("journal intent failed for register (fail-closed)")
+            raise HTTPException(503, "journal unavailable, registration refused")
+        try:
+            resp = await pdns.request("POST", path, payload=payload)
+        except BaseException:
+            await capture.mark_uncertain()
+            raise
+        await capture.finalize(resp.status)
     if resp.status == 409:
         raise HTTPException(409, "zone already exists upstream")
     if resp.status >= 400:
         raise HTTPException(502, f"upstream rejected zone create: {resp.status}")
 
     generation = None
+    conflicting_owner = None
     for _ in range(3):  # CAS retry: the exporter may push concurrently
         # Re-check ownership on every attempt: a concurrent exporter push may
         # have mapped the zone already — adding a second owner would break the
@@ -384,10 +391,7 @@ async def register_zone(body: RegisterBody):
             generation = rt.mapping.view.generation  # already mapped, done
             break
         if owner is not None:
-            logger.error(
-                f"register: {zone} concurrently mapped to {owner}, not {tn} — "
-                "leaving mapping untouched"
-            )
+            conflicting_owner = owner
             break
         try:
             generation = await rt.mapping.patch(
@@ -396,6 +400,17 @@ async def register_zone(body: RegisterBody):
             break
         except GenerationMismatch:
             continue
+    if conflicting_owner is not None:
+        # The exporter cannot heal this to the requested owner — a 201 with
+        # the requested teilnehmer would be a lie. Zone stays created
+        # (journaled); the conflict needs human/exporter resolution.
+        logger.error(
+            f"register: {zone} concurrently mapped to {conflicting_owner}, "
+            f"not {tn} — leaving mapping untouched (journal {capture.journal_id})"
+        )
+        raise HTTPException(
+            409, "zone created but concurrently mapped to another Teilnehmer"
+        )
     if generation is None:
         # Zone exists but unowned; the next exporter push (member DB is the
         # source of registrations) heals this. Surface it, don't hide it.
