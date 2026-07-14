@@ -386,6 +386,19 @@ def test_health_public(client):
 
 def test_ready_admin_only_and_reports(client):
     assert client.get("/proxy/v1/ready", headers=act_as("alice")).status_code == 403
+    # contract: ADM/EXP/MET only — plain webui / registrar envs are refused
+    assert (
+        client.get("/proxy/v1/ready", headers={"X-API-Key": WEBUI_TOKEN}).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            "/proxy/v1/ready", headers={"X-API-Key": REGISTRAR_TOKEN}
+        ).status_code
+        == 403
+    )
+    r = client.get("/proxy/v1/ready", headers={"X-API-Key": EXPORTER_TOKEN})
+    assert r.status_code == 200
     r = client.get("/proxy/v1/ready", headers={"X-API-Key": ADMIN_TOKEN})
     assert r.status_code == 200
     body = r.json()

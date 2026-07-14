@@ -468,8 +468,11 @@ async def health():
 @router.get("/ready")
 async def ready():
     rt, identity = _runtime(), _identity()
-    if not (identity.is_admin or (identity.kind == "static" and identity.roles)):
-        raise HTTPException(403, "static or admin credential required")
+    # Contract (docs/api-contract.md): ADM/EXP/MET only — webui and registrar
+    # envs have no business reading ops internals.
+    _READY_ROLES = {"admin", "exporter", "metrics"}
+    if not (identity.is_admin or _READY_ROLES.intersection(identity.roles)):
+        raise HTTPException(403, "admin, exporter or metrics credential required")
     from powerdns_api_proxy.proxy import pdns
     upstream_ok = False
     try:
