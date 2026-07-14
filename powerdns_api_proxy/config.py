@@ -61,6 +61,12 @@ def check_token_defined(config: ProxyConfig, token: str):
 def dependency_check_token_defined(
     X_API_Key: str = Header(description="API Key for the proxy."),
 ):
+    # IN-Berlin extension: identity middleware may have authenticated this
+    # request via OIDC / act-as / TN key and synthesized an environment.
+    from powerdns_api_proxy.inberlin.identity import current_environment
+
+    if current_environment.get() is not None:
+        return
     check_token_defined(load_config(), X_API_Key)
 
 
@@ -94,6 +100,14 @@ def get_environment_for_token(
     Raises:
         ValueError: If no environment is found for the given token.
     """
+    # IN-Berlin extension: prefer the environment synthesized by the identity
+    # middleware (OIDC / act-as / TN key) over the static token map.
+    from powerdns_api_proxy.inberlin.identity import current_environment
+
+    dynamic_env = current_environment.get()
+    if dynamic_env is not None:
+        return dynamic_env
+
     sha512 = hashlib.sha512()
     sha512.update(token.encode())
     token_digest = sha512.digest().hex()

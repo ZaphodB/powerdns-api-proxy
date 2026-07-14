@@ -67,7 +67,14 @@ pdns = PDNSConnector(
 
 @asynccontextmanager
 async def _startup(app: FastAPI):
+    from powerdns_api_proxy.inberlin.reload import install_sighup_handler
+    from powerdns_api_proxy.inberlin.runtime import init_runtime, shutdown_runtime
+
+    runtime = await init_runtime()
+    if runtime is not None:
+        install_sighup_handler()
     yield
+    await shutdown_runtime()
 
 
 app = FastAPI(title="PowerDNS API Proxy", version="0.1.0", lifespan=_startup)
@@ -84,6 +91,17 @@ if not config.api_docs_enabled:
     )
 
 app.add_middleware(AuditMiddleware)
+
+# IN-Berlin extension middlewares (no-ops when the inberlin config block is
+# absent). Starlette runs the last-added middleware first: Identity must be
+# outermost so the journal sees a resolved identity.
+from powerdns_api_proxy.inberlin.middleware import (  # noqa: E402
+    IdentityMiddleware,
+    JournalMiddleware,
+)
+
+app.add_middleware(JournalMiddleware)
+app.add_middleware(IdentityMiddleware)
 
 if config.metrics_enabled:
     instrumentator = Instrumentator(
@@ -742,3 +760,7 @@ async def delete_tsigkey(server_id: str, tsigkey_id: str, X_API_Key: str = Heade
 app.include_router(router_proxy)
 app.include_router(router_pdns)
 app.include_router(router_health)
+
+from powerdns_api_proxy.inberlin.router import router as router_inberlin  # noqa: E402
+
+app.include_router(router_inberlin)
