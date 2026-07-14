@@ -2,8 +2,10 @@
 
 Single-writer discipline: all writes go through Store._write() which holds an
 asyncio.Lock and runs the sync sqlite3 work in a thread (never blocking the
-event loop). Reads run lock-free in threads. WAL mode, busy_timeout 5000.
-One uvicorn worker is an operational requirement (docs/authz-flow.md).
+event loop) on the dedicated write connection. Reads use per-thread
+connections — WAL mode lets them run concurrently with each other and with
+the writer. busy_timeout 5000. One uvicorn worker is an operational
+requirement (docs/authz-flow.md).
 """
 
 import asyncio
@@ -97,9 +99,9 @@ class Store:
         self._write_lock = asyncio.Lock()
         # check_same_thread=False lets asyncio.to_thread run DB work off the
         # event loop, but a single sqlite3.Connection is NOT safe for concurrent
-        # use across threads. This lock serializes every access to _conn (reads
-        # included), preventing a _read thread from racing a _write thread's
-        # open transaction.
+        # use across threads. This lock serializes access to the WRITE
+        # connection; reads get per-thread connections (WAL readers don't
+        # block the writer or each other).
         self._conn_lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -108,6 +110,17 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._local = threading.local()
+
+    def _read_conn(self) -> sqlite3.Connection:
+        """Per-thread read connection (asyncio.to_thread pool threads)."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
+        return conn
 
     def close(self) -> None:
         self._conn.close()
@@ -128,11 +141,9 @@ class Store:
             return await asyncio.to_thread(run)
 
     async def _read(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
-        """Read off the event loop; shares the connection lock with writes."""
-        def run():
-            with self._conn_lock:
-                return fn(self._conn)
-        return await asyncio.to_thread(run)
+        """Read off the event loop on a per-thread connection — concurrent
+        with writes and other reads (WAL snapshot isolation)."""
+        return await asyncio.to_thread(lambda: fn(self._read_conn()))
 
     async def writable(self) -> bool:
         """Health probe for /proxy/v1/ready: can we open a write transaction?"""
@@ -357,8 +368,9 @@ class Store:
         status_code: Optional[int],
         after_state: Optional[str],
         rollbackable: bool,
-        rrsets: list[tuple[str, str, Optional[str], Optional[str]]] = [],
+        rrsets: Optional[list[tuple[str, str, Optional[str], Optional[str]]]] = None,
     ) -> None:
+        rrsets = rrsets or []
         def run(c: sqlite3.Connection) -> None:
             # Idempotent: only a pending/uncertain row transitions, and only
             # then do we insert rrset rows — a retried finalize is a no-op
@@ -457,6 +469,14 @@ class Store:
         def run(c: sqlite3.Connection) -> int:
             c.execute(
                 "DELETE FROM journal_rrset WHERE journal_id IN"
+                " (SELECT id FROM journal WHERE ts < ? AND status IN ('committed', 'failed'))",
+                (cutoff,),
+            )
+            # rollback_of has no ON DELETE action and foreign_keys is ON:
+            # detach surviving children first, or deleting a referenced parent
+            # raises IntegrityError and kills every future prune run.
+            c.execute(
+                "UPDATE journal SET rollback_of = NULL WHERE rollback_of IN"
                 " (SELECT id FROM journal WHERE ts < ? AND status IN ('committed', 'failed'))",
                 (cutoff,),
             )

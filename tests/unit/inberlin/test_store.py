@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 
 import pytest
 
@@ -166,6 +167,33 @@ def test_journal_prune_keeps_pending_and_uncertain(store):
     # unreconciled rows must never age out silently
     assert run(store.journal_get(ids["uncertain"])) is not None
     assert run(store.journal_get(ids["pending"])) is not None
+
+
+def test_journal_prune_survives_rollback_fk(store):
+    # a rollback entry referencing a pruned parent must not break the prune
+    parent = _intent(store, "committed")
+    child = run(
+        store.journal_intent(
+            teilnehmer=None, actor="x", actor_kind="static", impersonator=None,
+            webui_user=None, zone=".", method="POST", path="/p", operation="other",
+            raw_request=None, before_state=None, rollback_of=parent,
+        )
+    )
+    run(
+        store.journal_finalize(
+            child, status="committed", status_code=200, after_state=None,
+            rollbackable=False,
+        )
+    )
+    # age only the parent past the cutoff
+    aged = sqlite3.connect(store.path)
+    aged.execute("UPDATE journal SET ts = '2000-01-01T00:00:00+00:00' WHERE id = ?", (parent,))
+    aged.commit()
+    aged.close()
+    assert run(store.journal_prune(365)) == 1  # parent pruned, no IntegrityError
+    surviving = run(store.journal_get(child))
+    assert surviving is not None
+    assert surviving["rollback_of"] is None  # detached, not dangling
 
 
 def test_journal_query_limit_clamped(store):

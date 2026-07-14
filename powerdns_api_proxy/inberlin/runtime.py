@@ -2,6 +2,7 @@
 lifespan. None when the `inberlin:` config block is absent (extension off)."""
 
 import asyncio
+import weakref
 from typing import Optional
 
 from powerdns_api_proxy.inberlin.mapping import MappingState
@@ -27,18 +28,25 @@ class Runtime:
             OIDCValidator(settings.oidc) if settings.oidc else None
         )
         self._prune_task: Optional[asyncio.Task] = None
-        self._zone_locks: dict[str, asyncio.Lock] = {}
+        # WeakValueDictionary: a lock lives only while some task holds a
+        # strong reference (i.e. is inside the `async with`). Zone names come
+        # from authenticated-but-arbitrary request paths — a plain dict would
+        # be a slow memory leak an API-key holder could feed forever.
+        self._zone_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
 
     def zone_lock(self, zone: str) -> asyncio.Lock:
         """Per-zone mutation lock. The journal's before/after capture is only
         correct if intent → forward → finalize runs serialized per zone —
         concurrent same-RRset writes would record stale before-states and a
         later rollback would silently wipe the intervening change. Single
-        worker, so an asyncio.Lock suffices; entries are never evicted (zone
-        count is small and bounded)."""
+        worker, so an asyncio.Lock suffices. Callers must keep the returned
+        lock referenced for the whole critical section (`async with` does)."""
         lock = self._zone_locks.get(zone)
         if lock is None:
-            lock = self._zone_locks[zone] = asyncio.Lock()
+            lock = asyncio.Lock()
+            self._zone_locks[zone] = lock
         return lock
 
     async def start(self) -> None:
