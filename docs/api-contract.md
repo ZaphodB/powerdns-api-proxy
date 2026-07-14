@@ -15,6 +15,9 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
     to audit history, undo changes, or mint more keys). Endpoints below marked
     **TN-session** reject a `tn-key` with 403.
 - **EXP** — static `mapping-exporter` env (capability: mapping endpoints only)
+- **REG** — static registrar env (capability: `/proxy/v1/register` ONLY —
+  create-only by construction: no `/api/v1`, no reads, no mutation of existing
+  zones; pdns's unconditional 409 on duplicate zone create is the backstop)
 - **MET** — static metrics env
 
 Impersonation: `X-Impersonate-Teilnehmer` — ADM only, journaled with both
@@ -36,6 +39,7 @@ identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
 | POST | `/proxy/v1/journal/{id}/rollback` | TN-session/ADM | `409` drift vs recorded after; body `{"force": true}` ADM-only; requires *current* authz on zone; returns new journal id |
 | GET | `/proxy/v1/journal/uncertain` | ADM | pending/uncertain rows + live upstream state for reconciliation |
 | POST | `/proxy/v1/journal/{id}/resolve` | ADM | finalize an uncertain row (`{"status": "committed"|"failed"}`), audited |
+| POST | `/proxy/v1/register` | REG/ADM | `{zone, teilnehmer}` → create zone from configured template (kind + nameservers, SOA synthesized by pdns) + mapping entry, journaled against the Teilnehmer; `409` zone owned or exists upstream, `403` deny-set, `501` template unconfigured; returns `{zone, teilnehmer, journal_id, mapping_generation}` (`mapping_generation: null` = zone created but mapping update failed — exporter heals) |
 | GET | `/proxy/v1/keys` | TN | own keys: id, prefix, label, created_at, revoked_at |
 | POST | `/proxy/v1/keys` | TN (session: act-as or OIDC; **not** a key) | `{label}` → `{id, key}` — plaintext exactly once |
 | DELETE | `/proxy/v1/keys/{id}` | TN/ADM | revoke; TN only own |

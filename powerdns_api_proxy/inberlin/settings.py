@@ -24,13 +24,24 @@ class OIDCSettings(BaseModel):
     jwks_ttl_seconds: int = 3600
 
 
+class RegistrationSettings(BaseModel):
+    """Template for /proxy/v1/register zone creation (registrar role).
+    pdns synthesizes the SOA (default-soa-content) and NS rrsets from the
+    nameservers list."""
+
+    nameservers: list[str]
+    kind: str = "Native"
+
+
 class InBerlinSettings(BaseModel):
     enabled: bool = True
     state_db: str = "/var/lib/pdns-api-proxy/state.sqlite"
     oidc: Optional[OIDCSettings] = None
     deny_zones: list[str] = []
-    # environment name -> roles (admin | exporter | webui | metrics)
+    # environment name -> roles (admin | exporter | webui | metrics | registrar)
     environment_roles: dict[str, list[str]] = {}
+    # required for /proxy/v1/register; absent = registration disabled (501)
+    registration: Optional[RegistrationSettings] = None
     journal_retention_days: int = 730
     upstream_server_id: str = "localhost"
     max_keys_per_teilnehmer: int = 10

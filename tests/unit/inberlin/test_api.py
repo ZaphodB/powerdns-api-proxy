@@ -7,6 +7,7 @@ from tests.unit.inberlin.conftest import (
     ADMIN_TOKEN,
     EXPORTER_TOKEN,
     PLAIN_TOKEN,
+    REGISTRAR_TOKEN,
     WEBUI_TOKEN,
 )
 
@@ -249,6 +250,89 @@ def test_key_journal_access_forbidden(client):
     entry_id = client.get("/proxy/v1/journal", headers=act_as("alice")).json()["entries"][0]["id"]
     assert client.post(f"/proxy/v1/journal/{entry_id}/rollback",
                        headers={"X-API-Key": plaintext}).status_code == 403
+
+
+# -- registration ---------------------------------------------------------------
+
+REG = {"X-API-Key": REGISTRAR_TOKEN}
+
+
+def test_register_creates_zone_mapping_and_journal(client, fake_pdns):
+    r = client.post("/proxy/v1/register", headers=REG,
+                    json={"zone": "Neu.Example", "teilnehmer": "Carol"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["zone"] == "neu.example." and body["teilnehmer"] == "carol"
+    assert body["mapping_generation"] == 2
+    assert "neu.example." in fake_pdns.zones
+    # carol owns it immediately
+    r = client.get("/proxy/v1/mapping/self", headers=act_as("carol"))
+    assert r.json()["zones"] == ["neu.example."]
+    # journaled as committed zone-create by the registrar env
+    r = client.get(f"/proxy/v1/journal/{body['journal_id']}",
+                   headers={"X-API-Key": ADMIN_TOKEN})
+    entry = r.json()
+    assert entry["operation"] == "zone-create"
+    assert entry["status"] == "committed"
+    assert entry["actor"] == "registrar"
+    assert entry["teilnehmer"] == "carol"
+
+
+def test_register_refuses_existing_and_denied(client, fake_pdns):
+    # owned in mapping (kunde.example -> alice)
+    r = client.post("/proxy/v1/register", headers=REG,
+                    json={"zone": "kunde.example", "teilnehmer": "carol"})
+    assert r.status_code == 409
+    # exists upstream but unowned
+    fake_pdns.zones["ghost.example."] = {
+        "id": "ghost.example.", "name": "ghost.example.", "kind": "Native", "rrsets": [],
+    }
+    r = client.post("/proxy/v1/register", headers=REG,
+                    json={"zone": "ghost.example", "teilnehmer": "carol"})
+    assert r.status_code == 409
+    # deny set
+    r = client.post("/proxy/v1/register", headers=REG,
+                    json={"zone": "evil.in-berlin.de", "teilnehmer": "carol"})
+    assert r.status_code == 403
+
+
+def test_registrar_token_is_create_only(client):
+    # no /api/v1 reads or writes with the registrar credential
+    assert client.get(ZONES_PATH, headers=REG).json() == []
+    r = client.patch(f"{ZONES_PATH}/kunde.example.", headers=REG, json=PATCH_BODY)
+    assert r.status_code in (401, 403)
+    r = client.delete(f"{ZONES_PATH}/kunde.example.", headers=REG)
+    assert r.status_code in (401, 403)
+    # direct zone-create on /api/v1 (bypassing template) also denied
+    r = client.post(ZONES_PATH, headers=REG,
+                    json={"name": "raw.example.", "kind": "Native", "rrsets": []})
+    assert r.status_code in (401, 403)
+    # and no proxy admin surfaces
+    assert client.get("/proxy/v1/journal", headers=REG).status_code == 403
+    assert client.get("/proxy/v1/mapping", headers=REG).status_code == 403
+
+
+def test_register_denied_for_other_credentials(client):
+    body = {"zone": "x.example", "teilnehmer": "carol"}
+    assert client.post("/proxy/v1/register", headers=act_as("alice"),
+                       json=body).status_code == 403
+    assert client.post("/proxy/v1/register", headers={"X-API-Key": EXPORTER_TOKEN},
+                       json=body).status_code == 403
+    # admin is allowed
+    assert client.post("/proxy/v1/register", headers={"X-API-Key": ADMIN_TOKEN},
+                       json=body).status_code == 201
+
+
+def test_register_501_when_unconfigured(client):
+    import powerdns_api_proxy.inberlin.runtime as runtime_mod
+    rt = runtime_mod.get_runtime()
+    saved, rt.settings.registration = rt.settings.registration, None
+    try:
+        r = client.post("/proxy/v1/register", headers=REG,
+                        json={"zone": "y.example", "teilnehmer": "carol"})
+        assert r.status_code == 501
+    finally:
+        rt.settings.registration = saved
 
 
 # -- fail-closed journal ----------------------------------------------------------

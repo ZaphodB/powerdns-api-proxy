@@ -1,6 +1,7 @@
-"""/proxy/v1 router: mapping, overrides, journal, rollback, keys, identity,
-health/ready, reload (docs/api-contract.md)."""
+"""/proxy/v1 router: mapping, overrides, journal, rollback, register, keys,
+identity, health/ready, reload (docs/api-contract.md)."""
 
+import dataclasses
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -8,9 +9,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from powerdns_api_proxy.inberlin.identity import Identity, current_identity
-from powerdns_api_proxy.inberlin.journal import JournalCapture, classify
+from powerdns_api_proxy.inberlin.journal import JournalCapture, classify, fetch_zone
 from powerdns_api_proxy.inberlin.keys import generate_key
-from powerdns_api_proxy.inberlin.names import canonical_tn, canonical_zone
+from powerdns_api_proxy.inberlin.names import (
+    canonical_tn,
+    canonical_zone,
+    zone_is_or_under,
+)
 from powerdns_api_proxy.inberlin.rollback import (
     NotRollbackable,
     build_rollback_request,
@@ -304,6 +309,88 @@ async def rollback_journal_entry(
     if resp.status >= 400:
         raise HTTPException(502, f"upstream rejected rollback: {resp.status}")
     return {"rolled_back": journal_id, "journal_id": capture.journal_id}
+
+
+# -- registration -------------------------------------------------------------
+
+class RegisterBody(BaseModel):
+    zone: str
+    teilnehmer: str
+
+
+@router.post("/register", status_code=201)
+async def register_zone(body: RegisterBody):
+    """Create-only domain registration (registrar role or admin): new zone
+    from the configured template + mapping entry for the Teilnehmer, both
+    journaled. Existing zones are never touched — pdns rejects duplicate
+    creates with an unconditional 409 (verified in auth-5.1.x ws-auth.cc),
+    so this credential structurally cannot modify existing data."""
+    rt, identity = _runtime(), _identity()
+    if not (identity.is_admin or "registrar" in identity.roles):
+        raise HTTPException(403, "registrar or admin required")
+    reg = rt.settings.registration
+    if reg is None:
+        raise HTTPException(501, "registration not configured")
+    zone = canonical_zone(body.zone)
+    tn = canonical_tn(body.teilnehmer)
+    view = rt.mapping.view
+    for denied in view.deny_zones:
+        if zone_is_or_under(zone, denied):
+            raise HTTPException(403, "zone is on the deny list")
+    if view.owner_of(zone) is not None:
+        raise HTTPException(409, "zone already owned by a Teilnehmer")
+
+    from powerdns_api_proxy.proxy import pdns
+    server_id = rt.settings.upstream_server_id
+    if await fetch_zone(pdns, server_id, zone) is not None:
+        raise HTTPException(409, "zone already exists upstream")
+
+    payload = {"name": zone, "kind": reg.kind, "nameservers": reg.nameservers}
+    path = f"/api/v1/servers/{server_id}/zones"
+    info = classify("POST", path)
+    assert info is not None
+    # Journal against the target Teilnehmer so the registration shows up in
+    # their own journal history; actor stays the registrar credential.
+    journal_identity = dataclasses.replace(identity, effective_teilnehmer=tn)
+    capture = JournalCapture(rt, pdns, journal_identity, "POST", path, info, payload)
+    try:
+        await capture.intent()
+    except Exception:
+        logger.exception("journal intent failed for register (fail-closed)")
+        raise HTTPException(503, "journal unavailable, registration refused")
+    try:
+        resp = await pdns.request("POST", path, payload=payload)
+    except BaseException:
+        await capture.mark_uncertain()
+        raise
+    await capture.finalize(resp.status)
+    if resp.status == 409:
+        raise HTTPException(409, "zone already exists upstream")
+    if resp.status >= 400:
+        raise HTTPException(502, f"upstream rejected zone create: {resp.status}")
+
+    generation = None
+    for _ in range(3):  # CAS retry: the exporter may push concurrently
+        try:
+            generation = await rt.mapping.patch(
+                rt.mapping.view.generation, {tn: [zone]}, {}, identity.actor
+            )
+            break
+        except GenerationMismatch:
+            continue
+    if generation is None:
+        # Zone exists but unowned; the next exporter push (member DB is the
+        # source of registrations) heals this. Surface it, don't hide it.
+        logger.error(f"mapping update failed after zone create ({zone} -> {tn})")
+    return JSONResponse(
+        {
+            "zone": zone,
+            "teilnehmer": tn,
+            "journal_id": capture.journal_id,
+            "mapping_generation": generation,
+        },
+        status_code=201,
+    )
 
 
 # -- keys ---------------------------------------------------------------------

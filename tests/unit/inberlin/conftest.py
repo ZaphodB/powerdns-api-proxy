@@ -12,13 +12,14 @@ from fastapi.testclient import TestClient
 
 import powerdns_api_proxy.inberlin.runtime as runtime_mod
 from powerdns_api_proxy.inberlin.runtime import Runtime
-from powerdns_api_proxy.inberlin.settings import InBerlinSettings
+from powerdns_api_proxy.inberlin.settings import InBerlinSettings, RegistrationSettings
 from powerdns_api_proxy.models import ProxyConfig, ProxyConfigEnvironment, ProxyConfigZone
 
 WEBUI_TOKEN = "webui-secret-token"
 EXPORTER_TOKEN = "exporter-secret-token"
 ADMIN_TOKEN = "admin-secret-token"
 PLAIN_TOKEN = "plain-static-token"
+REGISTRAR_TOKEN = "registrar-secret-token"
 
 
 def sha512(s: str) -> str:
@@ -42,6 +43,7 @@ def make_config() -> ProxyConfig:
                 token_sha512=sha512(PLAIN_TOKEN),
                 zones=[ProxyConfigZone(name="static.example.")],
             ),
+            ProxyConfigEnvironment(name="registrar", token_sha512=sha512(REGISTRAR_TOKEN)),
         ],
     )
 
@@ -54,7 +56,11 @@ def make_settings(tmp_path) -> InBerlinSettings:
             "webui": ["webui"],
             "exporter": ["exporter"],
             "infra-admin": ["admin"],
+            "registrar": ["registrar"],
         },
+        registration=RegistrationSettings(
+            nameservers=["ns1.example.", "ns2.example."]
+        ),
     )
 
 
