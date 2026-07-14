@@ -2,9 +2,12 @@ import re
 
 
 def check_subzone(zone: str, main_zone: str) -> bool:
-    if zone.rstrip(".").endswith(main_zone.rstrip(".")):
-        return True
-    return False
+    """Label-boundary aware: 'evilexample.de' is NOT a subzone of 'example.de'."""
+    child = zone.rstrip(".").lower()
+    parent = main_zone.rstrip(".").lower()
+    if child == parent:
+        return False
+    return child.endswith("." + parent)
 
 
 def check_zone_in_regex(zone: str, regex: str) -> bool:
