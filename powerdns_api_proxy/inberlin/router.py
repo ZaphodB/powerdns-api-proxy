@@ -376,6 +376,19 @@ async def register_zone(body: RegisterBody):
 
     generation = None
     for _ in range(3):  # CAS retry: the exporter may push concurrently
+        # Re-check ownership on every attempt: a concurrent exporter push may
+        # have mapped the zone already — adding a second owner would break the
+        # single-ownership invariant owner_of/rollback rely on.
+        owner = rt.mapping.view.owner_of(zone)
+        if owner == tn:
+            generation = rt.mapping.view.generation  # already mapped, done
+            break
+        if owner is not None:
+            logger.error(
+                f"register: {zone} concurrently mapped to {owner}, not {tn} — "
+                "leaving mapping untouched"
+            )
+            break
         try:
             generation = await rt.mapping.patch(
                 rt.mapping.view.generation, {tn: [zone]}, {}, identity.actor
@@ -469,9 +482,14 @@ async def health():
 async def ready():
     rt, identity = _runtime(), _identity()
     # Contract (docs/api-contract.md): ADM/EXP/MET only — webui and registrar
-    # envs have no business reading ops internals.
-    _READY_ROLES = {"admin", "exporter", "metrics"}
-    if not (identity.is_admin or _READY_ROLES.intersection(identity.roles)):
+    # envs have no business reading ops internals. Admin is checked via
+    # is_admin, never via the roles list: an act-as identity inherits its
+    # env's full role list without being an admin.
+    if not (
+        identity.is_admin
+        or "exporter" in identity.roles
+        or "metrics" in identity.roles
+    ):
         raise HTTPException(403, "admin, exporter or metrics credential required")
     from powerdns_api_proxy.proxy import pdns
     upstream_ok = False
