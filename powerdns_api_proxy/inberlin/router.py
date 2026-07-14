@@ -48,6 +48,13 @@ def _require_exporter_or_admin(identity: Identity) -> None:
         raise HTTPException(403, "exporter or admin required")
 
 
+def _require_session_tn(identity: Identity) -> str:
+    """Journal/rollback access needs a session (act-as or OIDC), never a key."""
+    if identity.kind == "tn-key":
+        raise HTTPException(403, "not available for API keys, use a session")
+    return _require_tn(identity)
+
+
 def _require_tn(identity: Identity) -> str:
     if not identity.effective_teilnehmer:
         raise HTTPException(403, "no effective Teilnehmer for this credential")
@@ -188,7 +195,7 @@ async def query_journal(
     else:
         if teilnehmer is not None:
             raise HTTPException(403, "teilnehmer filter is admin-only")
-        tn_filter = _require_tn(identity)
+        tn_filter = _require_session_tn(identity)
     rows = await rt.store.journal_query(
         teilnehmer=tn_filter,
         zone=canonical_zone(zone) if zone else None,
@@ -217,7 +224,7 @@ async def get_journal_entry(journal_id: int):
     entry = await rt.store.journal_get(journal_id)
     if entry is None:
         raise HTTPException(404, "journal entry not found")
-    if not identity.is_admin and entry["teilnehmer"] != _require_tn(identity):
+    if not identity.is_admin and entry["teilnehmer"] != _require_session_tn(identity):
         raise HTTPException(404, "journal entry not found")  # no IDOR oracle
     return entry
 
@@ -249,7 +256,7 @@ async def rollback_journal_entry(
     entry = await rt.store.journal_get(journal_id)
     if entry is None:
         raise HTTPException(404, "journal entry not found")
-    if not identity.is_admin and entry["teilnehmer"] != _require_tn(identity):
+    if not identity.is_admin and entry["teilnehmer"] != _require_session_tn(identity):
         raise HTTPException(404, "journal entry not found")
     if entry["status"] != "committed" or not entry["rollbackable"]:
         raise HTTPException(409, "entry is not rollbackable")
@@ -355,7 +362,7 @@ async def health():
 @router.get("/ready")
 async def ready():
     rt, identity = _runtime(), _identity()
-    if not (identity.is_admin or identity.roles):
+    if not (identity.is_admin or (identity.kind == "static" and identity.roles)):
         raise HTTPException(403, "static or admin credential required")
     from powerdns_api_proxy.proxy import pdns
     upstream_ok = False
