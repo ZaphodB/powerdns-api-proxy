@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from powerdns_api_proxy.config import load_config
