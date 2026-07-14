@@ -12,6 +12,13 @@ from powerdns_api_proxy.logging import logger
 
 
 class Runtime:
+    """Owns the extension's long-lived state: SQLite store, in-memory mapping,
+    optional OIDC validator, and the daily journal-prune task.
+
+    Exactly one instance per process (single uvicorn worker is an operational
+    requirement — the in-memory mapping and store locks are process-local).
+    """
+
     def __init__(self, settings: InBerlinSettings):
         self.settings = settings
         self.store = Store(settings.state_db)
@@ -22,6 +29,7 @@ class Runtime:
         self._prune_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
+        """Load the mapping snapshot from SQLite and start the prune loop."""
         await self.mapping.load()
         logger.info(
             f"inberlin runtime up: mapping generation {self.mapping.view.generation}, "
@@ -35,6 +43,7 @@ class Runtime:
         self.store.close()
 
     async def _prune_loop(self) -> None:
+        """Daily journal retention prune (journal_retention_days, default 2y)."""
         while True:
             try:
                 pruned = await self.store.journal_prune(
@@ -47,6 +56,7 @@ class Runtime:
             await asyncio.sleep(24 * 3600)
 
     def env_roles(self, env_name: str) -> tuple[str, ...]:
+        """Roles configured for a static environment name (empty if none)."""
         return tuple(self.settings.environment_roles.get(env_name, ()))
 
 
@@ -58,6 +68,8 @@ def get_runtime() -> Optional[Runtime]:
 
 
 async def init_runtime() -> Optional[Runtime]:
+    """App-lifespan entry point: build and start the runtime, or return None
+    (extension disabled) when no `inberlin:` config block exists."""
     global _runtime
     settings = load_inberlin_settings()
     if settings is None:

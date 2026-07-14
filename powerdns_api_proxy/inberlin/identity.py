@@ -23,7 +23,10 @@ class Identity:
 
     @property
     def is_session(self) -> bool:
-        """True for interactive sessions (act-as / OIDC) that may mint keys."""
+        """True for interactive sessions (act-as / OIDC): journal read + rollback.
+
+        Key minting is stricter still — OIDC only (router checks kind directly).
+        """
         return self.kind in ("webui-act-as", "oidc")
 
 

@@ -29,4 +29,5 @@ def zone_is_or_under(zone: str, parent: str) -> bool:
 
 
 def zone_depth(zone: str) -> int:
+    """Label count of the canonical zone; deeper = more specific for override precedence."""
     return canonical_zone(zone).rstrip(".").count(".") + 1

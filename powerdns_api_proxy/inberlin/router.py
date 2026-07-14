@@ -66,6 +66,7 @@ def _require_tn(identity: Identity) -> str:
 
 
 def _require_generation(if_match: Optional[str]) -> int:
+    """Parse the mandatory If-Match CAS generation header (400 if absent/bad)."""
     if if_match is None:
         raise HTTPException(400, "If-Match header with current generation required")
     try:
@@ -171,6 +172,7 @@ async def delete_override(override_id: int):
 # -- journal ----------------------------------------------------------------
 
 def _journal_row_public(row: dict) -> dict:
+    """List-view projection: metadata only, no before/after payloads."""
     return {
         k: row[k]
         for k in (
@@ -256,6 +258,9 @@ class RollbackBody(BaseModel):
 async def rollback_journal_entry(
     journal_id: int, request: Request, body: RollbackBody = RollbackBody()
 ):
+    """Inverse-apply a committed entry. Requires session (or admin), CURRENT
+    authz on the zone, no drift vs the recorded after-state (force=admin).
+    The rollback is itself journaled with rollback_of set."""
     rt, identity = _runtime(), _identity()
     entry = await rt.store.journal_get(journal_id)
     if entry is None:

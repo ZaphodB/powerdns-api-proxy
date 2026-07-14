@@ -128,12 +128,14 @@ class Store:
             return await asyncio.to_thread(run)
 
     async def _read(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
+        """Read off the event loop; shares the connection lock with writes."""
         def run():
             with self._conn_lock:
                 return fn(self._conn)
         return await asyncio.to_thread(run)
 
     async def writable(self) -> bool:
+        """Health probe for /proxy/v1/ready: can we open a write transaction?"""
         try:
             await self._write(lambda c: c.execute("SELECT 1").fetchone())
             return True
@@ -405,6 +407,8 @@ class Store:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
+        """Filtered journal listing (newest first, limit capped at 1000).
+        name/rtype filters join through journal_rrset."""
         def run(c: sqlite3.Connection):
             sql = "SELECT DISTINCT j.* FROM journal j"
             where, params = [], []
@@ -434,6 +438,7 @@ class Store:
     async def journal_resolve(
         self, journal_id: int, status: str, resolved_by: str
     ) -> bool:
+        """Admin finalization of a pending/uncertain row; False if already settled."""
         def run(c: sqlite3.Connection) -> bool:
             cur = c.execute(
                 "UPDATE journal SET status = ?, resolved_by = ? WHERE id = ?"
@@ -444,6 +449,8 @@ class Store:
         return await self._write(run)
 
     async def journal_prune(self, retention_days: int) -> int:
+        """Delete settled entries older than the retention window; pending rows
+        are kept regardless of age (they still need reconciliation)."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
         def run(c: sqlite3.Connection) -> int:
             c.execute(
@@ -466,12 +473,16 @@ class Store:
 
 
 class KeyLimitReached(Exception):
+    """Per-Teilnehmer active key cap hit (raised inside the insert txn → 409)."""
+
     def __init__(self, count: int):
         self.count = count
         super().__init__(f"active key limit reached ({count})")
 
 
 class GenerationMismatch(Exception):
+    """Mapping CAS failed: caller's If-Match generation is stale (→ 409)."""
+
     def __init__(self, current: int):
         self.current = current
         super().__init__(f"mapping generation mismatch, current is {current}")

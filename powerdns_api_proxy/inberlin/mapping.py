@@ -19,12 +19,15 @@ from powerdns_api_proxy.inberlin.store import Store
 
 @dataclass(frozen=True)
 class MappingView:
+    """Immutable snapshot of the authz mapping; replaced wholesale on update."""
+
     generation: int
     zones_by_tn: dict[str, frozenset[str]]
     overrides: dict[str, str]  # canonical zone -> canonical tn
     deny_zones: tuple[str, ...] = ()
 
     def zones_for(self, teilnehmer: str) -> set[str]:
+        """Mapped zones plus override grants for a Teilnehmer (canonical)."""
         tn = canonical_tn(teilnehmer)
         zones = set(self.zones_by_tn.get(tn, frozenset()))
         zones.update(z for z, owner in self.overrides.items() if owner == tn)
@@ -61,18 +64,23 @@ class MappingView:
 
 
 class MappingState:
+    """Mutable holder of the current MappingView; writes go through the Store
+    with generation CAS, then swap the view reference (atomic for readers)."""
+
     def __init__(self, store: Store, deny_zones: list[str]):
         self._store = store
         self._deny = tuple(canonical_zone(z) for z in deny_zones)
         self.view = MappingView(0, {}, {}, self._deny)
 
     async def load(self) -> None:
+        """Restore the last committed snapshot from SQLite (startup path)."""
         generation, mapping, overrides = await self._store.load_mapping()
         self.view = self._build(generation, mapping, overrides)
 
     def _build(
         self, generation: int, mapping: dict[str, set[str]], overrides: dict[str, str]
     ) -> MappingView:
+        """Canonicalize all names once at build time so lookups stay cheap."""
         return MappingView(
             generation=generation,
             zones_by_tn={
@@ -88,6 +96,7 @@ class MappingState:
     async def replace(
         self, expected_generation: int, mapping: dict[str, list[str]], actor: str
     ) -> int:
+        """Full replace (PUT). CAS on expected_generation; returns new generation."""
         normalized = {
             canonical_tn(tn): {canonical_zone(z) for z in zones}
             for tn, zones in mapping.items()
@@ -108,6 +117,7 @@ class MappingState:
         remove: dict[str, list[str]],
         actor: str,
     ) -> int:
+        """Incremental add/remove (PATCH). Same CAS semantics as replace()."""
         current = {tn: set(zones) for tn, zones in self.view.zones_by_tn.items()}
         for tn, zones in add.items():
             current.setdefault(canonical_tn(tn), set()).update(
@@ -127,6 +137,7 @@ class MappingState:
         return new_gen
 
     async def reload_overrides(self) -> None:
+        """Rebuild the view after an override table change (keeps generation)."""
         generation, mapping, overrides = await self._store.load_mapping()
         self.view = self._build(self.view.generation, mapping, overrides)
 

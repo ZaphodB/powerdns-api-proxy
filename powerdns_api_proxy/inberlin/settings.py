@@ -58,6 +58,11 @@ class InBerlinSettings(BaseModel):
 
 @lru_cache(maxsize=1)
 def load_inberlin_settings(path: Optional[Path] = None) -> Optional[InBerlinSettings]:
+    """Parse the `inberlin:` block from PROXY_CONFIG_PATH (or explicit path).
+
+    Returns None when the block is absent or `enabled: false` — the extension
+    is then fully off. Cached; reload.py clears via reset_settings_cache().
+    """
     if not path:
         env_path = os.getenv("PROXY_CONFIG_PATH")
         if not env_path:

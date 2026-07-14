@@ -20,16 +20,19 @@ from powerdns_api_proxy.pdns import PDNSConnector
 
 
 class RollbackDrift(Exception):
+    """Live upstream state no longer matches the entry's recorded after-state."""
+
     def __init__(self, details: list[str]):
         self.details = details
         super().__init__("; ".join(details))
 
 
 class NotRollbackable(Exception):
-    pass
+    """Entry has no inverse (crypto/tsig/meta ops, or missing recorded state)."""
 
 
 def _normalize_rrset(rrset: Optional[dict]) -> Optional[dict]:
+    """Canonical comparable form (name canonicalized, records sorted) for drift checks."""
     if rrset is None:
         return None
     return {

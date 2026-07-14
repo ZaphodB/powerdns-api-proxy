@@ -28,6 +28,7 @@ def generate_key() -> tuple[str, str, str]:
 
 
 def parse_prefix(token: str) -> Optional[str]:
+    """Extract the 8-hex-char prefix from an inb_* token, or None if malformed."""
     parts = token.split("_", 2)
     if len(parts) == 3 and parts[0] == KEY_NAMESPACE and len(parts[1]) == 8:
         return parts[1]

@@ -55,6 +55,7 @@ async def fetch_zone(pdns: PDNSConnector, server_id: str, zone_id: str) -> Optio
 
 
 def rrsets_by_key(zone: Optional[dict]) -> dict[tuple[str, str], dict]:
+    """Zone rrsets indexed by (canonical name, type); {} for a missing zone."""
     if not zone:
         return {}
     return {
@@ -64,6 +65,7 @@ def rrsets_by_key(zone: Optional[dict]) -> dict[tuple[str, str], dict]:
 
 
 def affected_rrset_keys(body: Optional[dict]) -> list[tuple[str, str]]:
+    """(name, type) keys a PATCH body touches — scopes the before/after diff."""
     if not body:
         return []
     return [
@@ -78,6 +80,7 @@ def diff_rrsets(
     before: dict[tuple[str, str], dict],
     after: dict[tuple[str, str], dict],
 ) -> list[tuple[str, str, Optional[str], Optional[str]]]:
+    """journal_rrset rows (name, type, before_json, after_json) for the touched keys."""
     rows = []
     for name, rtype in keys:
         b = before.get((name, rtype))
@@ -118,6 +121,7 @@ class JournalCapture:
         return self.info["operation"]
 
     def _zone_name(self) -> str:
+        """Canonical zone for the journal row; '.' when undeterminable."""
         if self.info["zone_id"]:
             return canonical_zone(self.info["zone_id"])
         if self.operation == "zone-create" and self.body and self.body.get("name"):
@@ -170,6 +174,8 @@ class JournalCapture:
             logger.exception(f"could not mark journal entry {self.journal_id} uncertain")
 
     async def finalize(self, status_code: int) -> None:
+        """Post-GET after-state and settle the row: failed (>=400), committed,
+        or uncertain if the post-GET/store write itself fails."""
         assert self.journal_id is not None
         if status_code >= 400:
             await self.runtime.store.journal_finalize(

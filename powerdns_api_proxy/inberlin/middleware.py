@@ -42,10 +42,15 @@ _PUBLIC_PATHS = ("/proxy/v1/health", "/", "/health/pdns", "/metrics")
 
 
 def _error(status: int, detail: str) -> JSONResponse:
+    """PowerDNS-style error body {"error": detail}."""
     return JSONResponse({"error": detail}, status_code=status)
 
 
 class RateLimiter:
+    """Sliding-window (60s) in-memory limiter. Buckets: auth failures per
+    client IP, mutations per effective TN/token, and one global webui bucket
+    capping all act-as mutations combined."""
+
     def __init__(
         self,
         failures_per_minute: int,
@@ -70,6 +75,15 @@ class RateLimiter:
 
 
 class IdentityMiddleware(BaseHTTPMiddleware):
+    """Resolve exactly one credential class into an Identity + environment.
+
+    Order: X-API-Key (static env → webui act-as / plain static, else TN key)
+    XOR Bearer (OIDC admin / impersonation / bridged Teilnehmer). Ambiguous or
+    disallowed header combinations are rejected, never precedence-resolved.
+    Sets the identity/environment contextvars for the request and strips all
+    proxy identity headers before the upstream forward.
+    """
+
     async def dispatch(self, request: Request, call_next):
         runtime = get_runtime()
         if runtime is None:
@@ -228,12 +242,16 @@ class IdentityMiddleware(BaseHTTPMiddleware):
 
 
 def _static_env_for_token(config, token: str):
+    """Static environment whose sha512 matches the presented token, or None."""
     import hashlib
     digest = hashlib.sha512(token.encode()).hexdigest()
     return config.token_env_map.get(digest)
 
 
 class JournalMiddleware(BaseHTTPMiddleware):
+    """Wrap journal-relevant /api/v1 mutations: intent before forward
+    (fail-closed 503), finalize after; uncertain on in-flight exceptions."""
+
     async def dispatch(self, request: Request, call_next):
         runtime = get_runtime()
         if runtime is None:
