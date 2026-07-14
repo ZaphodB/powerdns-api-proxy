@@ -41,7 +41,7 @@ def _normalize_rrset(rrset: Optional[dict]) -> Optional[dict]:
                 {"content": r["content"], "disabled": bool(r.get("disabled", False))}
                 for r in rrset.get("records", [])
             ),
-            key=lambda r: r["content"],
+            key=lambda r: (r["content"], r["disabled"]),
         ),
     }
 

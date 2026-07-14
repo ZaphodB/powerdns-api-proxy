@@ -156,6 +156,19 @@ class JournalCapture:
             rollback_of=rollback_of,
         )
 
+    async def mark_uncertain(self) -> None:
+        """Best-effort: flag the pending row uncertain when the request errored
+        after intent (mutation may or may not have reached pdns)."""
+        if self.journal_id is None:
+            return
+        try:
+            await self.runtime.store.journal_finalize(
+                self.journal_id, status="uncertain", status_code=None,
+                after_state=None, rollbackable=False,
+            )
+        except Exception:
+            logger.exception(f"could not mark journal entry {self.journal_id} uncertain")
+
     async def finalize(self, status_code: int) -> None:
         assert self.journal_id is not None
         if status_code >= 400:

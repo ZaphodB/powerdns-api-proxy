@@ -82,3 +82,14 @@ def test_missing_groups_claim_not_admin(rsa_key):
     v = make_validator(rsa_key)
     claims = asyncio.run(v.validate(make_token(rsa_key, groups=None)))
     assert not v.is_admin(claims)
+
+
+def test_token_without_kid_rejected(rsa_key):
+    v = make_validator(rsa_key)
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": ISSUER, "aud": AUDIENCE, "sub": "x", "iat": now, "exp": now + 300},
+        rsa_key, algorithm="RS256",  # no kid header
+    )
+    with pytest.raises(ValueError, match="kid"):
+        asyncio.run(v.validate(token))

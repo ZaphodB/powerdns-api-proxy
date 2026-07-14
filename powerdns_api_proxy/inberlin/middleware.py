@@ -169,8 +169,13 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 )
                 environment = environment_for_admin(identity)
             else:
-                # future: Teilnehmer OIDC via teilnehmer_identity bridge
-                tn = canonical_tn(username)
+                # Non-admin OIDC = future Teilnehmer SSO. Resolve the stable
+                # `sub` through the teilnehmer_identity bridge — never trust the
+                # mutable username claim as an authorization identity. Until a
+                # member is explicitly bridged, Teilnehmer OIDC is not enabled.
+                tn = await runtime.store.teilnehmer_for_sub(sub)
+                if tn is None:
+                    return _error(403, "Teilnehmer SSO not enabled for this account")
                 identity = Identity(
                     kind="oidc", actor=sub, display=username, effective_teilnehmer=tn
                 )
@@ -185,11 +190,18 @@ class IdentityMiddleware(BaseHTTPMiddleware):
         id_token = current_identity.set(identity)
         env_token = current_environment.set(environment)
         try:
-            # upstream endpoints require the X-API-Key header to exist
-            if not api_key:
-                request.scope["headers"] = [
-                    (k, v) for k, v in request.scope["headers"]
-                ] + [(b"x-api-key", b"inberlin-contextvar")]
+            # Strip proxy-only identity headers so they can never leak upstream
+            # (defense-in-depth; PDNSConnector builds its own header set anyway),
+            # and ensure X-API-Key exists for creds that didn't carry one — the
+            # upstream endpoints require the header, its value is ignored (the
+            # environment comes from the contextvar).
+            _strip = {b"x-teilnehmer", b"x-impersonate-teilnehmer",
+                      b"x-webui-user", b"authorization"}
+            headers = [(k, v) for k, v in request.scope["headers"]
+                       if k.lower() not in _strip]
+            if not any(k.lower() == b"x-api-key" for k, _ in headers):
+                headers.append((b"x-api-key", b"inberlin-contextvar"))
+            request.scope["headers"] = headers
             return await call_next(request)
         finally:
             current_identity.reset(id_token)
@@ -234,6 +246,12 @@ class JournalMiddleware(BaseHTTPMiddleware):
             logger.exception("journal intent failed — refusing mutation (fail-closed)")
             return _error(503, "journal unavailable, mutation refused")
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except BaseException:
+            # The mutation may already have reached pdns; never leave the row
+            # pending. Mark it uncertain for admin reconciliation, then re-raise.
+            await capture.mark_uncertain()
+            raise
         await capture.finalize(response.status_code)
         return response

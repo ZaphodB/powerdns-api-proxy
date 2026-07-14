@@ -43,6 +43,13 @@ class MappingView:
                 depth = zone_depth(ov_zone)
                 if best_override is None or depth > best_override[0]:
                     best_override = (depth, owner)
+        # Overrides are deliberate admin exceptions to the bulk-exported
+        # mapping: any applicable override (on the zone or an ancestor) wins
+        # over implicit ownership, even a deeper explicit mapping entry
+        # (docs/authz-flow.md §5, plan Decision 6). Most-specific override
+        # wins among overrides.
+        if best_override is not None:
+            return best_override[1]
         best_owned: tuple[int, str] | None = None
         for tn, zones in self.zones_by_tn.items():
             for owned in zones:
@@ -50,8 +57,6 @@ class MappingView:
                     depth = zone_depth(owned)
                     if best_owned is None or depth > best_owned[0]:
                         best_owned = (depth, tn)
-        if best_override and (not best_owned or best_override[0] >= best_owned[0]):
-            return best_override[1]
         return best_owned[1] if best_owned else None
 
 
@@ -90,8 +95,10 @@ class MappingState:
         new_gen = await self._store.save_mapping(
             expected_generation, normalized, actor, {"mapping": mapping}
         )
-        _, _, overrides = await self._store.load_mapping()
-        self.view = self._build(new_gen, normalized, overrides)
+        # Overrides live in a separate table untouched by save_mapping; reuse
+        # the current in-memory copy so a transient read failure can't leave
+        # memory behind the committed generation.
+        self.view = self._build(new_gen, normalized, dict(self.view.overrides))
         return new_gen
 
     async def patch(
@@ -116,8 +123,7 @@ class MappingState:
             expected_generation, current, actor,
             {"patch": {"add": add, "remove": remove}},
         )
-        _, _, overrides = await self._store.load_mapping()
-        self.view = self._build(new_gen, current, overrides)
+        self.view = self._build(new_gen, current, dict(self.view.overrides))
         return new_gen
 
     async def reload_overrides(self) -> None:

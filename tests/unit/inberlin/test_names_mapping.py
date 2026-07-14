@@ -58,8 +58,22 @@ def test_override_beats_implicit_and_mapping_entry():
     # override on sub.example. beats alice's implicit grant
     assert v.owner_of("sub.example.") == "carol"
     assert v.owner_of("x.sub.example.") == "carol"
-    # deeper explicit mapping entry: override depth 3 vs owned depth 4 -> bob
-    assert v.owner_of("deep.sub.example.") == "bob"
+    # override-first: an applicable ancestor override wins even over a deeper
+    # explicit mapping entry — carol's delegation of sub.example. is a
+    # deliberate admin exception that a bulk-exported bob entry can't silently
+    # override (an admin would add a deeper override for bob instead).
+    assert v.owner_of("deep.sub.example.") == "carol"
+
+
+def test_ancestor_override_wins_over_deeper_mapping_entry():
+    # override-first: even a more-specific explicit mapping entry does not beat
+    # an ancestor override (the admin's deliberate delegation holds).
+    v = _view(
+        overrides={"example.": "carol"},
+        zones_by_tn={"bob": frozenset({"deep.sub.example."})},
+    )
+    assert v.owner_of("deep.sub.example.") == "carol"
+    assert v.owner_of("x.deep.sub.example.") == "carol"
 
 
 def test_deeper_override_wins_over_shallower():

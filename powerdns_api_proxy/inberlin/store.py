@@ -9,6 +9,7 @@ One uvicorn worker is an operational requirement (docs/authz-flow.md).
 import asyncio
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -94,6 +95,12 @@ class Store:
     def __init__(self, path: str):
         self.path = path
         self._write_lock = asyncio.Lock()
+        # check_same_thread=False lets asyncio.to_thread run DB work off the
+        # event loop, but a single sqlite3.Connection is NOT safe for concurrent
+        # use across threads. This lock serializes every access to _conn (reads
+        # included), preventing a _read thread from racing a _write thread's
+        # open transaction.
+        self._conn_lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -109,18 +116,22 @@ class Store:
         """Serialized write inside BEGIN IMMEDIATE, off the event loop."""
         async with self._write_lock:
             def run():
-                try:
-                    self._conn.execute("BEGIN IMMEDIATE")
-                    result = fn(self._conn)
-                    self._conn.commit()
-                    return result
-                except Exception:
-                    self._conn.rollback()
-                    raise
+                with self._conn_lock:
+                    try:
+                        self._conn.execute("BEGIN IMMEDIATE")
+                        result = fn(self._conn)
+                        self._conn.commit()
+                        return result
+                    except Exception:
+                        self._conn.rollback()
+                        raise
             return await asyncio.to_thread(run)
 
     async def _read(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
-        return await asyncio.to_thread(fn, self._conn)
+        def run():
+            with self._conn_lock:
+                return fn(self._conn)
+        return await asyncio.to_thread(run)
 
     async def writable(self) -> bool:
         try:
@@ -205,6 +216,29 @@ class Store:
             cur = c.execute("DELETE FROM override_grant WHERE id = ?", (override_id,))
             return cur.rowcount > 0
         return await self._write(run)
+
+    # -- teilnehmer identity bridge --------------------------------------
+
+    async def teilnehmer_for_sub(self, oidc_sub: str) -> Optional[str]:
+        return await self._read(
+            lambda c: (
+                lambda row: row["teilnehmer"] if row else None
+            )(
+                c.execute(
+                    "SELECT teilnehmer FROM teilnehmer_identity WHERE oidc_sub = ?",
+                    (oidc_sub,),
+                ).fetchone()
+            )
+        )
+
+    async def bind_teilnehmer_sub(self, teilnehmer: str, oidc_sub: str) -> None:
+        await self._write(
+            lambda c: c.execute(
+                "INSERT OR REPLACE INTO teilnehmer_identity (teilnehmer, oidc_sub)"
+                " VALUES (?, ?)",
+                (teilnehmer, oidc_sub),
+            )
+        )
 
     # -- api keys ---------------------------------------------------------
 
@@ -314,11 +348,16 @@ class Store:
         rrsets: list[tuple[str, str, Optional[str], Optional[str]]] = [],
     ) -> None:
         def run(c: sqlite3.Connection) -> None:
-            c.execute(
+            # Idempotent: only a pending/uncertain row transitions, and only
+            # then do we insert rrset rows — a retried finalize is a no-op
+            # instead of duplicating inverse data.
+            cur = c.execute(
                 "UPDATE journal SET status = ?, status_code = ?, after_state = ?,"
-                " rollbackable = ? WHERE id = ?",
+                " rollbackable = ? WHERE id = ? AND status IN ('pending', 'uncertain')",
                 (status, status_code, after_state, int(rollbackable), journal_id),
             )
+            if cur.rowcount == 0:
+                return
             c.executemany(
                 "INSERT INTO journal_rrset (journal_id, name, rtype, before_rrset, after_rrset)"
                 " VALUES (?, ?, ?, ?, ?)",
@@ -406,10 +445,7 @@ class Store:
                 "DELETE FROM journal WHERE ts < ? AND status != 'pending'", (cutoff,)
             )
             return cur.rowcount
-        n = await self._write(run)
-        if n:
-            await self._read(lambda c: c.execute("PRAGMA incremental_vacuum"))
-        return n
+        return await self._write(run)
 
     async def db_size_bytes(self) -> int:
         def run(c: sqlite3.Connection) -> int:

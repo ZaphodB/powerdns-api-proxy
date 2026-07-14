@@ -34,9 +34,12 @@ class OIDCValidator:
                 data = await resp.json()
         return data["jwks_uri"]
 
-    async def _refresh(self) -> None:
+    async def _refresh(self, force: bool = False) -> None:
         async with self._refresh_lock:
-            if time.monotonic() - self._fetched_at < 5:  # single-flight collapse
+            # single-flight collapse of concurrent refreshes, but an unknown-kid
+            # refresh (force) must not be suppressed just because a TTL refresh
+            # ran seconds ago — key rotation would 401 valid tokens for ~5s.
+            if not force and time.monotonic() - self._fetched_at < 5:
                 return
             url = await self._jwks_url()
             async with aiohttp.ClientSession() as session:
@@ -57,13 +60,16 @@ class OIDCValidator:
             self._fetched_at = time.monotonic()
             logger.info(f"JWKS refreshed, {len(keys)} signing keys")
 
-    async def _key_for(self, kid: Optional[str]) -> Optional[PyJWK]:
-        stale = time.monotonic() - self._fetched_at > self.settings.jwks_ttl_seconds
-        if stale or (kid and kid not in self._jwks):
-            await self._refresh()
-        if kid:
+    async def _key_for(self, kid: str) -> Optional[PyJWK]:
+        if kid in self._jwks:
+            stale = time.monotonic() - self._fetched_at > self.settings.jwks_ttl_seconds
+            if stale:
+                await self._refresh()
             return self._jwks.get(kid)
-        return next(iter(self._jwks.values()), None)
+        # unknown kid: force a refresh (bypasses the TTL single-flight window),
+        # then look again — collapse handled by the refresh lock re-check.
+        await self._refresh(force=True)
+        return self._jwks.get(kid)
 
     async def validate(self, token: str) -> dict[str, Any]:
         """Returns claims. Raises jwt exceptions / ValueError on any failure."""
@@ -71,7 +77,12 @@ class OIDCValidator:
         alg = header.get("alg")
         if alg not in self.settings.algorithms:
             raise ValueError(f"algorithm {alg} not allowed")
-        key = await self._key_for(header.get("kid"))
+        kid = header.get("kid")
+        if not kid:
+            # authentik always sets kid; requiring it avoids ambiguous
+            # arbitrary-key selection for a token without one.
+            raise ValueError("token has no kid")
+        key = await self._key_for(kid)
         if key is None:
             raise ValueError("no matching JWKS key")
         claims = jwt.decode(
