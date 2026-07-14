@@ -5,7 +5,7 @@ SQLite persistence happens in the same Store transaction that bumps the
 generation, so memory and disk cannot diverge on a successful request.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from powerdns_api_proxy.inberlin.names import (

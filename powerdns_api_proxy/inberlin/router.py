@@ -1,7 +1,6 @@
 """/proxy/v1 router: mapping, overrides, journal, rollback, keys, identity,
 health/ready, reload (docs/api-contract.md)."""
 
-import json
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
