@@ -15,7 +15,9 @@ from powerdns_api_proxy.inberlin.runtime import Runtime
 from powerdns_api_proxy.logging import logger
 from powerdns_api_proxy.pdns import PDNSConnector
 
-_ZONE_PATH = re.compile(r"^/api/v1/servers/(?P<server>[^/]+)/zones(?:/(?P<zone>[^/]+))?(?P<rest>/.*)?$")
+_ZONE_PATH = re.compile(
+    r"^/api/v1/servers/(?P<server>[^/]+)/zones(?:/(?P<zone>[^/]+))?(?P<rest>/.*)?$"
+)
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 SECRET_OPS = {"crypto", "tsig"}
@@ -28,7 +30,11 @@ def classify(method: str, path: str) -> Optional[dict[str, Any]]:
     m = _ZONE_PATH.match(path)
     if not m:
         if re.match(r"^/api/v1/servers/[^/]+/tsigkeys", path):
-            return {"operation": "tsig", "server_id": path.split("/")[4], "zone_id": None}
+            return {
+                "operation": "tsig",
+                "server_id": path.split("/")[4],
+                "zone_id": None,
+            }
         return None
     server, zone, rest = m.group("server"), m.group("zone"), m.group("rest") or ""
     if zone is None:
@@ -44,7 +50,9 @@ def classify(method: str, path: str) -> Optional[dict[str, Any]]:
     return {"operation": "zone-meta", "server_id": server, "zone_id": zone}
 
 
-async def fetch_zone(pdns: PDNSConnector, server_id: str, zone_id: str) -> Optional[dict]:
+async def fetch_zone(
+    pdns: PDNSConnector, server_id: str, zone_id: str
+) -> Optional[dict]:
     """Full zone incl. rrsets; None if the zone does not exist."""
     resp = await pdns.get(f"/api/v1/servers/{server_id}/zones/{zone_id}")
     if resp.status == 404:
@@ -58,10 +66,7 @@ def rrsets_by_key(zone: Optional[dict]) -> dict[tuple[str, str], dict]:
     """Zone rrsets indexed by (canonical name, type); {} for a missing zone."""
     if not zone:
         return {}
-    return {
-        (canonical_zone(r["name"]), r["type"]): r
-        for r in zone.get("rrsets", [])
-    }
+    return {(canonical_zone(r["name"]), r["type"]): r for r in zone.get("rrsets", [])}
 
 
 def affected_rrset_keys(body: Optional[dict]) -> list[tuple[str, str]]:
@@ -146,7 +151,7 @@ class JournalCapture:
         if self.operation not in SECRET_OPS and self.body is not None:
             raw = json.dumps(self.body)
         self.journal_id = await self.runtime.store.journal_intent(
-            teilnehmer=self.identity.effective_teilnehmer,
+            user=self.identity.effective_teilnehmer,
             actor=self.identity.actor,
             actor_kind=self.identity.kind,
             impersonator=self.identity.impersonator,
@@ -167,11 +172,16 @@ class JournalCapture:
             return
         try:
             await self.runtime.store.journal_finalize(
-                self.journal_id, status="uncertain", status_code=None,
-                after_state=None, rollbackable=False,
+                self.journal_id,
+                status="uncertain",
+                status_code=None,
+                after_state=None,
+                rollbackable=False,
             )
         except Exception:
-            logger.exception(f"could not mark journal entry {self.journal_id} uncertain")
+            logger.exception(
+                f"could not mark journal entry {self.journal_id} uncertain"
+            )
 
     async def finalize(self, status_code: int) -> None:
         """Post-GET after-state and settle the row: failed (4xx), uncertain
@@ -180,16 +190,22 @@ class JournalCapture:
         assert self.journal_id is not None
         if 400 <= status_code < 500:
             await self.runtime.store.journal_finalize(
-                self.journal_id, status="failed", status_code=status_code,
-                after_state=None, rollbackable=False,
+                self.journal_id,
+                status="failed",
+                status_code=status_code,
+                after_state=None,
+                rollbackable=False,
             )
             return
         if status_code >= 500:
             # A 5xx is as ambiguous as a transport error: pdns may have
             # applied the change before failing. Surface for reconciliation.
             await self.runtime.store.journal_finalize(
-                self.journal_id, status="uncertain", status_code=status_code,
-                after_state=None, rollbackable=False,
+                self.journal_id,
+                status="uncertain",
+                status_code=status_code,
+                after_state=None,
+                rollbackable=False,
             )
             return
         try:
@@ -200,7 +216,9 @@ class JournalCapture:
             if self.operation == "rrset-patch" and zone_id:
                 after_zone = await fetch_zone(self.pdns, server, zone_id)
                 rrset_rows = diff_rrsets(
-                    self._keys, rrsets_by_key(self._before_zone), rrsets_by_key(after_zone)
+                    self._keys,
+                    rrsets_by_key(self._before_zone),
+                    rrsets_by_key(after_zone),
                 )
                 rollbackable = True
             elif self.operation == "zone-delete":
@@ -210,15 +228,22 @@ class JournalCapture:
                 after_state = json.dumps(created) if created else None
                 rollbackable = created is not None
             await self.runtime.store.journal_finalize(
-                self.journal_id, status="committed", status_code=status_code,
-                after_state=after_state, rollbackable=rollbackable, rrsets=rrset_rows,
+                self.journal_id,
+                status="committed",
+                status_code=status_code,
+                after_state=after_state,
+                rollbackable=rollbackable,
+                rrsets=rrset_rows,
             )
         except Exception:
             logger.exception(f"journal finalize failed for entry {self.journal_id}")
             try:
                 await self.runtime.store.journal_finalize(
-                    self.journal_id, status="uncertain", status_code=status_code,
-                    after_state=None, rollbackable=False,
+                    self.journal_id,
+                    status="uncertain",
+                    status_code=status_code,
+                    after_state=None,
+                    rollbackable=False,
                 )
             except Exception:
                 logger.exception("could not even mark journal entry uncertain")

@@ -239,9 +239,9 @@ def ensure_rrsets_request_allowed(zone: ProxyConfigZone, request: RRSETRequest) 
     if zone.read_only:
         logger.info("RRSET update not allowed with read only token")
         raise HTTPException(403, "RRSET update not allowed with read only token")
-    if not isinstance(request, dict) or not isinstance(request.get('rrsets'), list):
-        raise HTTPException(422, 'malformed rrsets request')
-    for rrset in request['rrsets']:
+    if not isinstance(request, dict) or not isinstance(request.get("rrsets"), list):
+        raise HTTPException(422, "malformed rrsets request")
+    for rrset in request["rrsets"]:
         if not check_rrset_allowed(zone, rrset):
             logger.info(f"RRSET {rrset['name']} not allowed in zone {zone.name}")
             raise HTTPException(403, f"RRSET {rrset['name']} not allowed")

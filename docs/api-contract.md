@@ -6,7 +6,7 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
 ## Auth classes
 
 - **ADM** — OIDC Bearer with `admin_group`, or static env with `admin: true` capability
-- **TN** — effective Teilnehmer. Two sub-classes:
+- **TN** — effective User. Two sub-classes:
   - **TN-session** — webui act-as (`X-Teilnehmer`) or OIDC. Full member surface:
     DNS ops, journal read, rollback, key mint/list/revoke.
   - **TN-key** — a personal API key. Capability set is deliberately narrow:
@@ -38,14 +38,14 @@ traffic on top of per-member limits.
 | GET | `/proxy/v1/mapping` | ADM | `{generation, applied_at, mapping}` |
 | GET | `/proxy/v1/mapping/self` | TN | own zone list incl. override grants |
 | GET | `/proxy/v1/overrides` | ADM | list |
-| POST | `/proxy/v1/overrides` | ADM | `{zone, teilnehmer, note}`; `If-Match: <generation>` |
+| POST | `/proxy/v1/overrides` | ADM | `{zone, user, note}`; `If-Match: <generation>` |
 | DELETE | `/proxy/v1/overrides/{id}` | ADM | `If-Match` |
-| GET | `/proxy/v1/journal` | TN-session/ADM | filters `zone,name,type,since,until,limit,offset`; `teilnehmer=` ADM-only (TN → 403) |
+| GET | `/proxy/v1/journal` | TN-session/ADM | filters `zone,name,type,since,until,limit,offset`; `user=` ADM-only (TN → 403) |
 | GET | `/proxy/v1/journal/{id}` | TN-session/ADM | full entry incl. before/after, `rollbackable` |
 | POST | `/proxy/v1/journal/{id}/rollback` | TN-session/ADM | `409` drift vs recorded after; body `{"force": true}` ADM-only; requires *current* authz on zone; returns new journal id |
 | GET | `/proxy/v1/journal/uncertain` | ADM | pending/uncertain rows + live upstream state for reconciliation |
 | POST | `/proxy/v1/journal/{id}/resolve` | ADM | finalize an uncertain row (`{"status": "committed"|"failed"}`), audited |
-| POST | `/proxy/v1/register` | REG/ADM | `{zone, teilnehmer}` → create zone from configured template (kind + nameservers, SOA synthesized by pdns) + mapping entry, journaled against the Teilnehmer; `409` zone owned or exists upstream, `403` deny-set, `501` template unconfigured; returns `{zone, teilnehmer, journal_id, mapping_generation}` (`mapping_generation: null` = zone created but mapping update failed — exporter heals; `409` "zone created but concurrently mapped to another Teilnehmer" = zone exists, mapping conflict needs resolution). Rolling back the zone-create (admin-only) deletes the zone but leaves the mapping entry — the next exporter full-replace heals it |
+| POST | `/proxy/v1/register` | REG/ADM | `{zone, user}` → create zone from configured template (kind + nameservers, SOA synthesized by pdns) + mapping entry, journaled against the User; `409` zone owned or exists upstream, `403` deny-set, `501` template unconfigured; returns `{zone, user, journal_id, mapping_generation}` (`mapping_generation: null` = zone created but mapping update failed — exporter heals; `409` "zone created but concurrently mapped to another User" = zone exists, mapping conflict needs resolution). Rolling back the zone-create (admin-only) deletes the zone but leaves the mapping entry — the next exporter full-replace heals it |
 | GET | `/proxy/v1/keys` | TN | own keys: id, prefix, label, created_at, revoked_at |
 | POST | `/proxy/v1/keys` | TN **OIDC session only** (admin impersonation now, member OIDC later; act-as and keys → 403) | `{label}` → `{id, key}` — plaintext exactly once. Act-as minting removed 2026-07-15 (luna review): a compromised UI host must not mint persistent per-member credentials |
 | DELETE | `/proxy/v1/keys/{id}` | TN/ADM | revoke; TN only own |

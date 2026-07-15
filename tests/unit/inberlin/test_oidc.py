@@ -30,9 +30,13 @@ def make_validator(rsa_key) -> OIDCValidator:
 def make_token(rsa_key, **overrides):
     now = int(time.time())
     claims = {
-        "iss": ISSUER, "aud": AUDIENCE, "sub": "user-123",
-        "iat": now, "exp": now + 300,
-        "preferred_username": "Alice", "groups": ["members"],
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "sub": "user-123",
+        "iat": now,
+        "exp": now + 300,
+        "preferred_username": "Alice",
+        "groups": ["members"],
     }
     claims.update(overrides)
     return jwt.encode(claims, rsa_key, algorithm="RS256", headers={"kid": "test-kid"})
@@ -72,8 +76,9 @@ def test_expired_rejected(rsa_key):
 
 def test_disallowed_alg_rejected(rsa_key):
     v = make_validator(rsa_key)
-    token = jwt.encode({"iss": ISSUER, "aud": AUDIENCE, "sub": "x"},
-                       "hmac-secret", algorithm="HS256")
+    token = jwt.encode(
+        {"iss": ISSUER, "aud": AUDIENCE, "sub": "x"}, "hmac-secret", algorithm="HS256"
+    )
     with pytest.raises(ValueError):
         asyncio.run(v.validate(token))
 
@@ -89,7 +94,8 @@ def test_token_without_kid_rejected(rsa_key):
     now = int(time.time())
     token = jwt.encode(
         {"iss": ISSUER, "aud": AUDIENCE, "sub": "x", "iat": now, "exp": now + 300},
-        rsa_key, algorithm="RS256",  # no kid header
+        rsa_key,
+        algorithm="RS256",  # no kid header
     )
     with pytest.raises(ValueError, match="kid"):
         asyncio.run(v.validate(token))

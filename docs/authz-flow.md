@@ -11,9 +11,9 @@ credentials`. None → `401`.
 | class | transport | who |
 |---|---|---|
 | `static` | `X-API-Key` matching a YAML environment `token_sha512` | infra, admin, mapping-exporter, metrics, **webui** |
-| `webui-act-as` | `static` env with `act_as: true` **+** `X-Teilnehmer: <name>` (+ optional `X-Webui-User`) | web UI acting for an htpasswd-authenticated Teilnehmer |
-| `oidc` | `Authorization: Bearer <JWT>` (authentik access token) | admins now, Teilnehmer later |
-| `tn-key` | `X-API-Key` matching a hashed per-Teilnehmer key in SQLite | member automation (ACME, octoDNS) |
+| `webui-act-as` | `static` env with `act_as: true` **+** `X-Teilnehmer: <name>` (+ optional `X-Webui-User`) | web UI acting for an htpasswd-authenticated User |
+| `oidc` | `Authorization: Bearer <JWT>` (authentik access token) | admins now, User later |
+| `tn-key` | `X-API-Key` matching a hashed per-User key in SQLite | member automation (ACME, octoDNS) |
 
 `X-API-Key` lookup order: static env map first (config-defined, sha512), then
 `tn-key` store. A `static` env without `act_as` carrying `X-Teilnehmer` or
@@ -74,6 +74,6 @@ journal `raw_request`, logs, or tracebacks. Enforced by test.
 
 ## Later OIDC migration
 
-`teilnehmer_identity` bridge table (canonical name ↔ OIDC `sub`) exists from day 1;
-when Teilnehmer move to authentik, `sub` resolves through it to the same canonical
+`user_identity` bridge table (canonical name ↔ OIDC `sub`) exists from day 1;
+when User move to authentik, `sub` resolves through it to the same canonical
 name — keys, journal, mapping unaffected.

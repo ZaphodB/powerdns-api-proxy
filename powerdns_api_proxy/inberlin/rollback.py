@@ -66,7 +66,10 @@ def inverse_rrsets(entry_rrsets: list[dict]) -> list[dict]:
                     "changetype": "REPLACE",
                     "ttl": before.get("ttl"),
                     "records": [
-                        {"content": r["content"], "disabled": bool(r.get("disabled", False))}
+                        {
+                            "content": r["content"],
+                            "disabled": bool(r.get("disabled", False)),
+                        }
                         for r in before.get("records", [])
                     ],
                 }

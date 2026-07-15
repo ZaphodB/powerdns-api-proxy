@@ -7,7 +7,10 @@ from typing import Optional
 
 from powerdns_api_proxy.inberlin.mapping import MappingState
 from powerdns_api_proxy.inberlin.oidc import OIDCValidator
-from powerdns_api_proxy.inberlin.settings import InBerlinSettings, load_inberlin_settings
+from powerdns_api_proxy.inberlin.settings import (
+    InBerlinSettings,
+    load_inberlin_settings,
+)
 from powerdns_api_proxy.inberlin.store import Store
 from powerdns_api_proxy.logging import logger
 
@@ -54,7 +57,7 @@ class Runtime:
         await self.mapping.load()
         logger.info(
             f"inberlin runtime up: mapping generation {self.mapping.view.generation}, "
-            f"{len(self.mapping.view.zones_by_tn)} teilnehmer"
+            f"{len(self.mapping.view.zones_by_tn)} user"
         )
         self._prune_task = asyncio.create_task(self._prune_loop())
 

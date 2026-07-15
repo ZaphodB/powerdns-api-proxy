@@ -94,17 +94,27 @@ def test_key_cap_enforced_in_transaction(store):
 def test_journal_state_machine(store):
     jid = run(
         store.journal_intent(
-            teilnehmer="alice", actor="webui", actor_kind="webui-act-as",
-            impersonator=None, webui_user="alice", zone="kunde.example.",
-            method="PATCH", path="/api/v1/servers/localhost/zones/kunde.example.",
-            operation="rrset-patch", raw_request="{}", before_state=None,
+            user="alice",
+            actor="webui",
+            actor_kind="webui-act-as",
+            impersonator=None,
+            webui_user="alice",
+            zone="kunde.example.",
+            method="PATCH",
+            path="/api/v1/servers/localhost/zones/kunde.example.",
+            operation="rrset-patch",
+            raw_request="{}",
+            before_state=None,
         )
     )
     entry = run(store.journal_get(jid))
     assert entry["status"] == "pending"
     run(
         store.journal_finalize(
-            jid, status="committed", status_code=204, after_state=None,
+            jid,
+            status="committed",
+            status_code=204,
+            after_state=None,
             rollbackable=True,
             rrsets=[("www.kunde.example.", "A", None, '{"ttl": 300}')],
         )
@@ -114,7 +124,7 @@ def test_journal_state_machine(store):
     assert entry["rollbackable"] == 1
     assert entry["rrsets"][0]["rtype"] == "A"
 
-    rows = run(store.journal_query(teilnehmer="alice"))
+    rows = run(store.journal_query(user="alice"))
     assert len(rows) == 1
     rows = run(store.journal_query(name="www.kunde.example.", rtype="A"))
     assert len(rows) == 1
@@ -125,14 +135,26 @@ def test_journal_state_machine(store):
 def test_journal_resolve_uncertain(store):
     jid = run(
         store.journal_intent(
-            teilnehmer=None, actor="x", actor_kind="static", impersonator=None,
-            webui_user=None, zone=".", method="POST", path="/p", operation="other",
-            raw_request=None, before_state=None,
+            user=None,
+            actor="x",
+            actor_kind="static",
+            impersonator=None,
+            webui_user=None,
+            zone=".",
+            method="POST",
+            path="/p",
+            operation="other",
+            raw_request=None,
+            before_state=None,
         )
     )
     run(
         store.journal_finalize(
-            jid, status="uncertain", status_code=204, after_state=None, rollbackable=False
+            jid,
+            status="uncertain",
+            status_code=204,
+            after_state=None,
+            rollbackable=False,
         )
     )
     assert run(store.journal_resolve(jid, "committed", "admin:x"))
@@ -142,15 +164,26 @@ def test_journal_resolve_uncertain(store):
 def _intent(store, status=None):
     jid = run(
         store.journal_intent(
-            teilnehmer=None, actor="x", actor_kind="static", impersonator=None,
-            webui_user=None, zone=".", method="POST", path="/p", operation="other",
-            raw_request=None, before_state=None,
+            user=None,
+            actor="x",
+            actor_kind="static",
+            impersonator=None,
+            webui_user=None,
+            zone=".",
+            method="POST",
+            path="/p",
+            operation="other",
+            raw_request=None,
+            before_state=None,
         )
     )
     if status:
         run(
             store.journal_finalize(
-                jid, status=status, status_code=200, after_state=None,
+                jid,
+                status=status,
+                status_code=200,
+                after_state=None,
                 rollbackable=False,
             )
         )
@@ -174,20 +207,34 @@ def test_journal_prune_survives_rollback_fk(store):
     parent = _intent(store, "committed")
     child = run(
         store.journal_intent(
-            teilnehmer=None, actor="x", actor_kind="static", impersonator=None,
-            webui_user=None, zone=".", method="POST", path="/p", operation="other",
-            raw_request=None, before_state=None, rollback_of=parent,
+            user=None,
+            actor="x",
+            actor_kind="static",
+            impersonator=None,
+            webui_user=None,
+            zone=".",
+            method="POST",
+            path="/p",
+            operation="other",
+            raw_request=None,
+            before_state=None,
+            rollback_of=parent,
         )
     )
     run(
         store.journal_finalize(
-            child, status="committed", status_code=200, after_state=None,
+            child,
+            status="committed",
+            status_code=200,
+            after_state=None,
             rollbackable=False,
         )
     )
     # age only the parent past the cutoff
     aged = sqlite3.connect(store.path)
-    aged.execute("UPDATE journal SET ts = '2000-01-01T00:00:00+00:00' WHERE id = ?", (parent,))
+    aged.execute(
+        "UPDATE journal SET ts = '2000-01-01T00:00:00+00:00' WHERE id = ?", (parent,)
+    )
     aged.commit()
     aged.close()
     assert run(store.journal_prune(365)) == 1  # parent pruned, no IntegrityError

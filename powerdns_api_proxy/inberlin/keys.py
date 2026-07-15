@@ -1,4 +1,4 @@
-"""Per-Teilnehmer static API keys. Format: inb_<8-char prefix>_<secret>.
+"""Per-User static API keys. Format: inb_<8-char prefix>_<secret>.
 
 Only sha512 hashes are stored (matches upstream token model); verification is
 constant-time; lookup is prefix-indexed. Plaintext exists only in the mint
@@ -36,12 +36,12 @@ def parse_prefix(token: str) -> Optional[str]:
 
 
 async def verify_key(store: Store, token: str) -> Optional[str]:
-    """Returns the canonical Teilnehmer for a valid, unrevoked key, else None."""
+    """Returns the canonical User for a valid, unrevoked key, else None."""
     prefix = parse_prefix(token)
     if prefix is None:
         return None
     candidate_hash = _sha512(token)
     for row in await store.find_key_by_prefix(prefix):
         if hmac.compare_digest(row["key_hash"], candidate_hash):
-            return row["teilnehmer"]
+            return row["user"]
     return None

@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from powerdns_api_proxy.config import load_config
 from powerdns_api_proxy.inberlin.authz import (
     environment_for_admin,
-    environment_for_teilnehmer,
+    environment_for_user,
 )
 from powerdns_api_proxy.inberlin.identity import (
     Identity,
@@ -78,7 +78,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
     """Resolve exactly one credential class into an Identity + environment.
 
     Order: X-API-Key (static env → webui act-as / plain static, else TN key)
-    XOR Bearer (OIDC admin / impersonation / bridged Teilnehmer). Ambiguous or
+    XOR Bearer (OIDC admin / impersonation / bridged User). Ambiguous or
     disallowed header combinations are rejected, never precedence-resolved.
     Sets the identity/environment contextvars for the request and strips all
     proxy identity headers before the upstream forward.
@@ -90,7 +90,11 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if not (path.startswith("/api/v1") or path.startswith("/proxy/v1") or path.startswith("/info")):
+        if not (
+            path.startswith("/api/v1")
+            or path.startswith("/proxy/v1")
+            or path.startswith("/info")
+        ):
             return await call_next(request)
         if path in _PUBLIC_PATHS:
             return await call_next(request)
@@ -110,13 +114,18 @@ class IdentityMiddleware(BaseHTTPMiddleware):
 
         if x_tn and x_imp:
             # reject-not-precedence-resolve: no credential class accepts both
-            return _error(400, "ambiguous identity headers: X-Teilnehmer and X-Impersonate-Teilnehmer")
+            return _error(
+                400,
+                "ambiguous identity headers: X-Teilnehmer and X-Impersonate-Teilnehmer",
+            )
         if api_key and bearer:
             return _error(400, "ambiguous credentials: X-API-Key and Bearer")
         if not api_key and not bearer:
             return _error(401, "Unauthorized")
 
-        limiter: RateLimiter = getattr(request.app.state, "inberlin_limiter", None) or RateLimiter(
+        limiter: RateLimiter = getattr(
+            request.app.state, "inberlin_limiter", None
+        ) or RateLimiter(
             runtime.settings.rate_limit_auth_failures_per_minute,
             runtime.settings.rate_limit_mutations_per_minute,
             runtime.settings.rate_limit_webui_global_mutations_per_minute,
@@ -152,11 +161,13 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                         webui_user=x_webui_user,
                         roles=roles,
                     )
-                    environment = environment_for_teilnehmer(
+                    environment = environment_for_user(
                         identity.effective_teilnehmer, runtime.mapping.view
                     )
                 elif x_tn or x_imp:
-                    return _error(403, "identity headers not allowed for this credential")
+                    return _error(
+                        403, "identity headers not allowed for this credential"
+                    )
                 else:
                     identity = Identity(
                         kind="static",
@@ -168,15 +179,15 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             else:
                 tn = await verify_key(runtime.store, api_key)
                 if tn is None:
-                    if limiter.hit("auth", request.client.host if request.client else "?"):
+                    if limiter.hit(
+                        "auth", request.client.host if request.client else "?"
+                    ):
                         return _error(429, "rate limited")
                     return _error(401, "Unauthorized")
                 if x_tn or x_imp:
                     return _error(403, "identity headers not allowed for API keys")
-                identity = Identity(
-                    kind="tn-key", actor=tn, effective_teilnehmer=tn
-                )
-                environment = environment_for_teilnehmer(tn, runtime.mapping.view)
+                identity = Identity(kind="tn-key", actor=tn, effective_teilnehmer=tn)
+                environment = environment_for_user(tn, runtime.mapping.view)
         else:
             if runtime.oidc is None:
                 return _error(401, "OIDC not configured")
@@ -196,11 +207,14 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 if not is_admin:
                     return _error(403, "impersonation requires admin group")
                 identity = Identity(
-                    kind="oidc", actor=sub, display=username,
+                    kind="oidc",
+                    actor=sub,
+                    display=username,
                     effective_teilnehmer=canonical_tn(x_imp),
-                    impersonator=sub, is_admin=True,
+                    impersonator=sub,
+                    is_admin=True,
                 )
-                environment = environment_for_teilnehmer(
+                environment = environment_for_user(
                     identity.effective_teilnehmer, runtime.mapping.view
                 )
             elif is_admin:
@@ -209,17 +223,17 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 )
                 environment = environment_for_admin(identity)
             else:
-                # Non-admin OIDC = future Teilnehmer SSO. Resolve the stable
-                # `sub` through the teilnehmer_identity bridge — never trust the
+                # Non-admin OIDC = future User SSO. Resolve the stable
+                # `sub` through the user_identity bridge — never trust the
                 # mutable username claim as an authorization identity. Until a
-                # member is explicitly bridged, Teilnehmer OIDC is not enabled.
-                tn = await runtime.store.teilnehmer_for_sub(sub)
+                # member is explicitly bridged, User OIDC is not enabled.
+                tn = await runtime.store.user_for_sub(sub)
                 if tn is None:
-                    return _error(403, "Teilnehmer SSO not enabled for this account")
+                    return _error(403, "User SSO not enabled for this account")
                 identity = Identity(
                     kind="oidc", actor=sub, display=username, effective_teilnehmer=tn
                 )
-                environment = environment_for_teilnehmer(tn, runtime.mapping.view)
+                environment = environment_for_user(tn, runtime.mapping.view)
 
         token_id = identity.actor
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -237,10 +251,15 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             # and ensure X-API-Key exists for creds that didn't carry one — the
             # upstream endpoints require the header, its value is ignored (the
             # environment comes from the contextvar).
-            _strip = {b"x-teilnehmer", b"x-impersonate-teilnehmer",
-                      b"x-webui-user", b"authorization"}
-            headers = [(k, v) for k, v in request.scope["headers"]
-                       if k.lower() not in _strip]
+            _strip = {
+                b"x-teilnehmer",
+                b"x-impersonate-teilnehmer",
+                b"x-webui-user",
+                b"authorization",
+            }
+            headers = [
+                (k, v) for k, v in request.scope["headers"] if k.lower() not in _strip
+            ]
             if not any(k.lower() == b"x-api-key" for k, _ in headers):
                 headers.append((b"x-api-key", b"inberlin-contextvar"))
             request.scope["headers"] = headers
@@ -253,6 +272,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
 def _static_env_for_token(config, token: str):
     """Static environment whose sha512 matches the presented token, or None."""
     import hashlib
+
     digest = hashlib.sha512(token.encode()).hexdigest()
     return config.token_env_map.get(digest)
 
@@ -285,6 +305,7 @@ class JournalMiddleware(BaseHTTPMiddleware):
             body = None
 
         from powerdns_api_proxy.proxy import pdns  # circular at import time
+
         capture = JournalCapture(
             runtime, pdns, identity, request.method, request.url.path, info, body
         )
@@ -297,7 +318,9 @@ class JournalMiddleware(BaseHTTPMiddleware):
                     rollback_of=getattr(request.state, "rollback_of", None)
                 )
             except Exception:
-                logger.exception("journal intent failed — refusing mutation (fail-closed)")
+                logger.exception(
+                    "journal intent failed — refusing mutation (fail-closed)"
+                )
                 return _error(503, "journal unavailable, mutation refused")
 
             try:

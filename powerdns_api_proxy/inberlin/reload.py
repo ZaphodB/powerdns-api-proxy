@@ -48,6 +48,7 @@ def install_sighup_handler() -> None:
             # A broken new config must never kill the process from a signal
             # handler; reload_static_config left the old config live.
             logger.exception("SIGHUP config reload failed; keeping old config")
+
     try:
         signal.signal(signal.SIGHUP, _handler)
         logger.info("SIGHUP config reload handler installed")

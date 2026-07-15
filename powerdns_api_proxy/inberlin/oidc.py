@@ -28,9 +28,13 @@ class OIDCValidator:
         """Configured jwks_url, or resolved via OIDC issuer discovery."""
         if self.settings.jwks_url:
             return self.settings.jwks_url
-        discovery = self.settings.issuer.rstrip("/") + "/.well-known/openid-configuration"
+        discovery = (
+            self.settings.issuer.rstrip("/") + "/.well-known/openid-configuration"
+        )
         async with aiohttp.ClientSession() as session:
-            async with session.get(discovery, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(
+                discovery, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
         return data["jwks_uri"]
@@ -52,7 +56,9 @@ class OIDCValidator:
             self._fetched_at = time.monotonic()
             url = await self._jwks_url()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
             keys: dict[str, PyJWK] = {}

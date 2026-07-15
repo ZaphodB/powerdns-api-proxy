@@ -1,5 +1,9 @@
 from powerdns_api_proxy.inberlin.mapping import MappingView
-from powerdns_api_proxy.inberlin.names import canonical_tn, canonical_zone, zone_is_or_under
+from powerdns_api_proxy.inberlin.names import (
+    canonical_tn,
+    canonical_zone,
+    zone_is_or_under,
+)
 
 
 def test_canonical_zone():

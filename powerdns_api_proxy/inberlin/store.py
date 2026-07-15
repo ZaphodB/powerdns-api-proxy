@@ -25,25 +25,25 @@ CREATE TABLE IF NOT EXISTS mapping_snapshot (
   payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mapping_entry (
-  teilnehmer TEXT NOT NULL,
+  user TEXT NOT NULL,
   zone TEXT NOT NULL,
-  PRIMARY KEY (teilnehmer, zone)
+  PRIMARY KEY (user, zone)
 );
 CREATE TABLE IF NOT EXISTS override_grant (
   id INTEGER PRIMARY KEY,
   zone TEXT NOT NULL UNIQUE,
-  teilnehmer TEXT NOT NULL,
+  user TEXT NOT NULL,
   created_by TEXT NOT NULL,
   created_at TEXT NOT NULL,
   note TEXT
 );
-CREATE TABLE IF NOT EXISTS teilnehmer_identity (
-  teilnehmer TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS user_identity (
+  user TEXT PRIMARY KEY,
   oidc_sub TEXT UNIQUE
 );
 CREATE TABLE IF NOT EXISTS api_key (
   id INTEGER PRIMARY KEY,
-  teilnehmer TEXT NOT NULL,
+  user TEXT NOT NULL,
   key_prefix TEXT NOT NULL,
   key_hash TEXT NOT NULL UNIQUE,
   label TEXT,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS journal (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',  -- pending|committed|failed|uncertain
-  teilnehmer TEXT,
+  user TEXT,
   actor TEXT NOT NULL,
   actor_kind TEXT NOT NULL,
   impersonator TEXT,
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS journal (
   resolved_by TEXT
 );
 CREATE INDEX IF NOT EXISTS journal_zone_ts ON journal(zone, ts);
-CREATE INDEX IF NOT EXISTS journal_tn_ts ON journal(teilnehmer, ts);
+CREATE INDEX IF NOT EXISTS journal_tn_ts ON journal(user, ts);
 CREATE INDEX IF NOT EXISTS journal_status ON journal(status);
 CREATE INDEX IF NOT EXISTS journal_rollback_of ON journal(rollback_of);
 CREATE TABLE IF NOT EXISTS journal_rrset (
@@ -139,6 +139,7 @@ class Store:
     async def _write(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
         """Serialized write inside BEGIN IMMEDIATE, off the event loop."""
         async with self._write_lock:
+
             def run():
                 with self._conn_lock:
                     try:
@@ -149,6 +150,7 @@ class Store:
                     except Exception:
                         self._conn.rollback()
                         raise
+
             return await asyncio.to_thread(run)
 
     async def _read(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:
@@ -169,19 +171,21 @@ class Store:
 
     async def load_mapping(self) -> tuple[int, dict[str, set[str]], dict[str, str]]:
         """Returns (generation, {tn: {zones}}, {override_zone: tn})."""
+
         def run(c: sqlite3.Connection):
             row = c.execute(
                 "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
             ).fetchone()
             generation = row["generation"] if row else 0
             mapping: dict[str, set[str]] = {}
-            for r in c.execute("SELECT teilnehmer, zone FROM mapping_entry"):
-                mapping.setdefault(r["teilnehmer"], set()).add(r["zone"])
+            for r in c.execute("SELECT user, zone FROM mapping_entry"):
+                mapping.setdefault(r["user"], set()).add(r["zone"])
             overrides = {
-                r["zone"]: r["teilnehmer"]
-                for r in c.execute("SELECT zone, teilnehmer FROM override_grant")
+                r["zone"]: r["user"]
+                for r in c.execute("SELECT zone, user FROM override_grant")
             }
             return generation, mapping, overrides
+
         return await self._read(run)
 
     async def save_mapping(
@@ -192,6 +196,7 @@ class Store:
         payload: dict,
     ) -> int:
         """CAS write of the full normalized mapping. Returns new generation."""
+
         def run(c: sqlite3.Connection) -> int:
             row = c.execute(
                 "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
@@ -207,10 +212,11 @@ class Store:
             )
             c.execute("DELETE FROM mapping_entry")
             c.executemany(
-                "INSERT INTO mapping_entry (teilnehmer, zone) VALUES (?, ?)",
+                "INSERT INTO mapping_entry (user, zone) VALUES (?, ?)",
                 [(tn, z) for tn, zones in mapping.items() for z in zones],
             )
             return new_gen
+
         return await self._write(run)
 
     # -- overrides --------------------------------------------------------
@@ -218,49 +224,47 @@ class Store:
     async def list_overrides(self) -> list[dict]:
         return await self._read(
             lambda c: [
-                dict(r)
-                for r in c.execute("SELECT * FROM override_grant ORDER BY id")
+                dict(r) for r in c.execute("SELECT * FROM override_grant ORDER BY id")
             ]
         )
 
     async def add_override(
-        self, zone: str, teilnehmer: str, created_by: str, note: str | None
+        self, zone: str, user: str, created_by: str, note: str | None
     ) -> int:
         def run(c: sqlite3.Connection) -> int:
             cur = c.execute(
-                "INSERT INTO override_grant (zone, teilnehmer, created_by, created_at, note)"
+                "INSERT INTO override_grant (zone, user, created_by, created_at, note)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (zone, teilnehmer, created_by, _utcnow(), note),
+                (zone, user, created_by, _utcnow(), note),
             )
             return int(cur.lastrowid or 0)
+
         return await self._write(run)
 
     async def delete_override(self, override_id: int) -> bool:
         def run(c: sqlite3.Connection) -> bool:
             cur = c.execute("DELETE FROM override_grant WHERE id = ?", (override_id,))
             return cur.rowcount > 0
+
         return await self._write(run)
 
-    # -- teilnehmer identity bridge --------------------------------------
+    # -- user identity bridge --------------------------------------
 
-    async def teilnehmer_for_sub(self, oidc_sub: str) -> Optional[str]:
+    async def user_for_sub(self, oidc_sub: str) -> Optional[str]:
         return await self._read(
-            lambda c: (
-                lambda row: row["teilnehmer"] if row else None
-            )(
+            lambda c: (lambda row: row["user"] if row else None)(
                 c.execute(
-                    "SELECT teilnehmer FROM teilnehmer_identity WHERE oidc_sub = ?",
+                    "SELECT user FROM user_identity WHERE oidc_sub = ?",
                     (oidc_sub,),
                 ).fetchone()
             )
         )
 
-    async def bind_teilnehmer_sub(self, teilnehmer: str, oidc_sub: str) -> None:
+    async def bind_user_sub(self, user: str, oidc_sub: str) -> None:
         await self._write(
             lambda c: c.execute(
-                "INSERT OR REPLACE INTO teilnehmer_identity (teilnehmer, oidc_sub)"
-                " VALUES (?, ?)",
-                (teilnehmer, oidc_sub),
+                "INSERT OR REPLACE INTO user_identity (user, oidc_sub) VALUES (?, ?)",
+                (user, oidc_sub),
             )
         )
 
@@ -268,7 +272,7 @@ class Store:
 
     async def insert_key(
         self,
-        teilnehmer: str,
+        user: str,
         prefix: str,
         key_hash: str,
         label: str | None,
@@ -277,26 +281,28 @@ class Store:
     ) -> int:
         """Inserts a key, enforcing the per-TN cap inside the same transaction
         (a router-side pre-check alone would be a TOCTOU across two awaits)."""
+
         def run(c: sqlite3.Connection) -> int:
             count = c.execute(
-                "SELECT COUNT(*) AS n FROM api_key WHERE teilnehmer = ? AND revoked_at IS NULL",
-                (teilnehmer,),
+                "SELECT COUNT(*) AS n FROM api_key WHERE user = ? AND revoked_at IS NULL",
+                (user,),
             ).fetchone()["n"]
             if count >= max_keys:
                 raise KeyLimitReached(count)
             cur = c.execute(
-                "INSERT INTO api_key (teilnehmer, key_prefix, key_hash, label, created_at, created_via)"
+                "INSERT INTO api_key (user, key_prefix, key_hash, label, created_at, created_via)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
-                (teilnehmer, prefix, key_hash, label, _utcnow(), via),
+                (user, prefix, key_hash, label, _utcnow(), via),
             )
             return int(cur.lastrowid or 0)
+
         return await self._write(run)
 
-    async def count_active_keys(self, teilnehmer: str) -> int:
+    async def count_active_keys(self, user: str) -> int:
         return await self._read(
             lambda c: c.execute(
-                "SELECT COUNT(*) AS n FROM api_key WHERE teilnehmer = ? AND revoked_at IS NULL",
-                (teilnehmer,),
+                "SELECT COUNT(*) AS n FROM api_key WHERE user = ? AND revoked_at IS NULL",
+                (user,),
             ).fetchone()["n"]
         )
 
@@ -311,31 +317,43 @@ class Store:
             ]
         )
 
-    async def list_keys(self, teilnehmer: str) -> list[dict]:
+    async def list_keys(self, user: str) -> list[dict]:
         return await self._read(
             lambda c: [
-                {k: r[k] for k in ("id", "key_prefix", "label", "created_at", "created_via", "revoked_at")}
+                {
+                    k: r[k]
+                    for k in (
+                        "id",
+                        "key_prefix",
+                        "label",
+                        "created_at",
+                        "created_via",
+                        "revoked_at",
+                    )
+                }
                 for r in c.execute(
-                    "SELECT * FROM api_key WHERE teilnehmer = ? ORDER BY id", (teilnehmer,)
+                    "SELECT * FROM api_key WHERE user = ? ORDER BY id", (user,)
                 )
             ]
         )
 
-    async def revoke_key(self, key_id: int, teilnehmer: str | None) -> bool:
-        """teilnehmer None = admin (any key)."""
+    async def revoke_key(self, key_id: int, user: str | None) -> bool:
+        """user None = admin (any key)."""
+
         def run(c: sqlite3.Connection) -> bool:
-            if teilnehmer is None:
+            if user is None:
                 cur = c.execute(
                     "UPDATE api_key SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
                     (_utcnow(), key_id),
                 )
             else:
                 cur = c.execute(
-                    "UPDATE api_key SET revoked_at = ? WHERE id = ? AND teilnehmer = ?"
+                    "UPDATE api_key SET revoked_at = ? WHERE id = ? AND user = ?"
                     " AND revoked_at IS NULL",
-                    (_utcnow(), key_id, teilnehmer),
+                    (_utcnow(), key_id, user),
                 )
             return cur.rowcount > 0
+
         return await self._write(run)
 
     # -- journal ----------------------------------------------------------
@@ -343,7 +361,7 @@ class Store:
     async def journal_intent(
         self,
         *,
-        teilnehmer: Optional[str],
+        user: Optional[str],
         actor: str,
         actor_kind: str,
         impersonator: Optional[str],
@@ -358,17 +376,28 @@ class Store:
     ) -> int:
         def run(c: sqlite3.Connection) -> int:
             cur = c.execute(
-                "INSERT INTO journal (ts, status, teilnehmer, actor, actor_kind,"
+                "INSERT INTO journal (ts, status, user, actor, actor_kind,"
                 " impersonator, webui_user, zone, method, path, operation,"
                 " raw_request, before_state, rollback_of)"
                 " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    _utcnow(), teilnehmer, actor, actor_kind, impersonator,
-                    webui_user, zone, method, path, operation, raw_request,
-                    before_state, rollback_of,
+                    _utcnow(),
+                    user,
+                    actor,
+                    actor_kind,
+                    impersonator,
+                    webui_user,
+                    zone,
+                    method,
+                    path,
+                    operation,
+                    raw_request,
+                    before_state,
+                    rollback_of,
                 ),
             )
             return int(cur.lastrowid or 0)
+
         return await self._write(run)
 
     async def journal_finalize(
@@ -382,6 +411,7 @@ class Store:
         rrsets: Optional[list[tuple[str, str, Optional[str], Optional[str]]]] = None,
     ) -> None:
         rrsets = rrsets or []
+
         def run(c: sqlite3.Connection) -> None:
             # Idempotent: only a pending/uncertain row transitions, and only
             # then do we insert rrset rows — a retried finalize is a no-op
@@ -398,11 +428,14 @@ class Store:
                 " VALUES (?, ?, ?, ?, ?)",
                 [(journal_id, n, t, b, a) for n, t, b, a in rrsets],
             )
+
         await self._write(run)
 
     async def journal_get(self, journal_id: int) -> Optional[dict]:
         def run(c: sqlite3.Connection):
-            row = c.execute("SELECT * FROM journal WHERE id = ?", (journal_id,)).fetchone()
+            row = c.execute(
+                "SELECT * FROM journal WHERE id = ?", (journal_id,)
+            ).fetchone()
             if not row:
                 return None
             entry = dict(row)
@@ -415,12 +448,13 @@ class Store:
                 )
             ]
             return entry
+
         return await self._read(run)
 
     async def journal_query(
         self,
         *,
-        teilnehmer: Optional[str] = None,
+        user: Optional[str] = None,
         zone: Optional[str] = None,
         name: Optional[str] = None,
         rtype: Optional[str] = None,
@@ -432,37 +466,47 @@ class Store:
     ) -> list[dict]:
         """Filtered journal listing (newest first, limit capped at 1000).
         name/rtype filters join through journal_rrset."""
+
         def run(c: sqlite3.Connection):
             sql = "SELECT DISTINCT j.* FROM journal j"
             where, params = [], []
             if name or rtype:
                 sql += " JOIN journal_rrset r ON r.journal_id = j.id"
                 if name:
-                    where.append("r.name = ?"); params.append(name)
+                    where.append("r.name = ?")
+                    params.append(name)
                 if rtype:
-                    where.append("r.rtype = ?"); params.append(rtype)
-            if teilnehmer:
-                where.append("j.teilnehmer = ?"); params.append(teilnehmer)
+                    where.append("r.rtype = ?")
+                    params.append(rtype)
+            if user:
+                where.append("j.user = ?")
+                params.append(user)
             if zone:
-                where.append("j.zone = ?"); params.append(zone)
+                where.append("j.zone = ?")
+                params.append(zone)
             if since:
-                where.append("j.ts >= ?"); params.append(since)
+                where.append("j.ts >= ?")
+                params.append(since)
             if until:
-                where.append("j.ts <= ?"); params.append(until)
+                where.append("j.ts <= ?")
+                params.append(until)
             if status:
-                where.append("j.status = ?"); params.append(status)
+                where.append("j.status = ?")
+                params.append(status)
             if where:
                 sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY j.id DESC LIMIT ? OFFSET ?"
             # clamp both ends: SQLite treats LIMIT -1 as unlimited
             params += [max(1, min(limit, 1000)), max(0, offset)]
             return [dict(r) for r in c.execute(sql, params)]
+
         return await self._read(run)
 
     async def journal_resolve(
         self, journal_id: int, status: str, resolved_by: str
     ) -> bool:
         """Admin finalization of a pending/uncertain row; False if already settled."""
+
         def run(c: sqlite3.Connection) -> bool:
             cur = c.execute(
                 "UPDATE journal SET status = ?, resolved_by = ? WHERE id = ?"
@@ -470,13 +514,17 @@ class Store:
                 (status, resolved_by, journal_id),
             )
             return cur.rowcount > 0
+
         return await self._write(run)
 
     async def journal_prune(self, retention_days: int) -> int:
         """Delete settled entries older than the retention window; pending AND
         uncertain rows are kept regardless of age — both still need admin
         reconciliation and must never age out silently."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=retention_days)
+        ).isoformat()
+
         def run(c: sqlite3.Connection) -> int:
             c.execute(
                 "DELETE FROM journal_rrset WHERE journal_id IN"
@@ -496,6 +544,7 @@ class Store:
                 (cutoff,),
             )
             return cur.rowcount
+
         return await self._write(run)
 
     async def db_size_bytes(self) -> int:
@@ -503,11 +552,12 @@ class Store:
             page_count = c.execute("PRAGMA page_count").fetchone()[0]
             page_size = c.execute("PRAGMA page_size").fetchone()[0]
             return page_count * page_size
+
         return await self._read(run)
 
 
 class KeyLimitReached(Exception):
-    """Per-Teilnehmer active key cap hit (raised inside the insert txn → 409)."""
+    """Per-User active key cap hit (raised inside the insert txn → 409)."""
 
     def __init__(self, count: int):
         self.count = count

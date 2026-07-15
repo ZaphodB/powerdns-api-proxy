@@ -18,7 +18,11 @@ from powerdns_api_proxy.inberlin.settings import (
     OIDCSettings,
     RegistrationSettings,
 )
-from powerdns_api_proxy.models import ProxyConfig, ProxyConfigEnvironment, ProxyConfigZone
+from powerdns_api_proxy.models import (
+    ProxyConfig,
+    ProxyConfigEnvironment,
+    ProxyConfigZone,
+)
 
 WEBUI_TOKEN = "webui-secret-token"
 EXPORTER_TOKEN = "exporter-secret-token"
@@ -37,7 +41,9 @@ def make_config() -> ProxyConfig:
         pdns_api_url="http://127.0.0.1:8081",
         environments=[
             ProxyConfigEnvironment(name="webui", token_sha512=sha512(WEBUI_TOKEN)),
-            ProxyConfigEnvironment(name="exporter", token_sha512=sha512(EXPORTER_TOKEN)),
+            ProxyConfigEnvironment(
+                name="exporter", token_sha512=sha512(EXPORTER_TOKEN)
+            ),
             ProxyConfigEnvironment(
                 name="infra-admin",
                 token_sha512=sha512(ADMIN_TOKEN),
@@ -48,7 +54,9 @@ def make_config() -> ProxyConfig:
                 token_sha512=sha512(PLAIN_TOKEN),
                 zones=[ProxyConfigZone(name="static.example.")],
             ),
-            ProxyConfigEnvironment(name="registrar", token_sha512=sha512(REGISTRAR_TOKEN)),
+            ProxyConfigEnvironment(
+                name="registrar", token_sha512=sha512(REGISTRAR_TOKEN)
+            ),
         ],
     )
 
@@ -63,9 +71,7 @@ def make_settings(tmp_path) -> InBerlinSettings:
             "infra-admin": ["admin"],
             "registrar": ["registrar"],
         },
-        registration=RegistrationSettings(
-            nameservers=["ns1.example.", "ns2.example."]
-        ),
+        registration=RegistrationSettings(nameservers=["ns1.example.", "ns2.example."]),
         oidc=OIDCSettings(
             issuer=OIDC_ISSUER, audience=OIDC_AUDIENCE, admin_group="dns-admins"
         ),
@@ -81,12 +87,14 @@ def _rsa_key():
     global _RSA_KEY
     if _RSA_KEY is None:
         from cryptography.hazmat.primitives.asymmetric import rsa
+
         _RSA_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     return _RSA_KEY
 
 
 def install_test_jwks(validator) -> None:
     import jwt
+
     public_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(
         _rsa_key().public_key(), as_dict=True
     )
@@ -98,15 +106,20 @@ def install_test_jwks(validator) -> None:
 def bearer(sub: str = "user-123", admin: bool = False, **headers) -> dict:
     """Authorization header with a valid OIDC token signed by the test key."""
     import jwt
+
     now = int(time.time())
     claims = {
-        "iss": OIDC_ISSUER, "aud": OIDC_AUDIENCE, "sub": sub,
-        "iat": now, "exp": now + 300,
+        "iss": OIDC_ISSUER,
+        "aud": OIDC_AUDIENCE,
+        "sub": sub,
+        "iat": now,
+        "exp": now + 300,
         "preferred_username": sub,
         "groups": ["dns-admins"] if admin else ["members"],
     }
-    token = jwt.encode(claims, _rsa_key(), algorithm="RS256",
-                       headers={"kid": "test-kid"})
+    token = jwt.encode(
+        claims, _rsa_key(), algorithm="RS256", headers={"kid": "test-kid"}
+    )
     return {"Authorization": f"Bearer {token}", **headers}
 
 
@@ -143,7 +156,9 @@ class FakePDNS:
             return FakeResponse(200, zone)
         return FakeResponse(200, {})
 
-    async def request(self, method: str, path: str, params: dict = {}, payload: dict = {}):
+    async def request(
+        self, method: str, path: str, params: dict = {}, payload: dict = {}
+    ):
         if method == "GET":
             return await self.get(path, params)
         parts = path.strip("/").split("/")
@@ -153,7 +168,9 @@ class FakePDNS:
             if name in self.zones:
                 return FakeResponse(409, {"error": "Conflict"})
             self.zones[name] = {
-                "id": name, "name": name, "kind": payload.get("kind", "Native"),
+                "id": name,
+                "name": name,
+                "kind": payload.get("kind", "Native"),
                 "rrsets": payload.get("rrsets", []),
             }
             return FakeResponse(201, self.zones[name])
@@ -168,13 +185,15 @@ class FakePDNS:
             for change in payload.get("rrsets", []):
                 key = (change["name"].rstrip(".").lower() + ".", change["type"])
                 zone["rrsets"] = [
-                    r for r in zone["rrsets"]
+                    r
+                    for r in zone["rrsets"]
                     if (r["name"].rstrip(".").lower() + ".", r["type"]) != key
                 ]
                 if change.get("changetype") == "REPLACE":
                     zone["rrsets"].append(
                         {
-                            "name": change["name"], "type": change["type"],
+                            "name": change["name"],
+                            "type": change["type"],
                             "ttl": change.get("ttl", 300),
                             "records": change.get("records", []),
                         }
@@ -199,10 +218,16 @@ class FakePDNS:
 def fake_pdns() -> Generator[FakePDNS, None, None]:
     fake = FakePDNS()
     fake.zones["kunde.example."] = {
-        "id": "kunde.example.", "name": "kunde.example.", "kind": "Native",
+        "id": "kunde.example.",
+        "name": "kunde.example.",
+        "kind": "Native",
         "rrsets": [
-            {"name": "www.kunde.example.", "type": "A", "ttl": 300,
-             "records": [{"content": "192.0.2.1", "disabled": False}]},
+            {
+                "name": "www.kunde.example.",
+                "type": "A",
+                "ttl": 300,
+                "records": [{"content": "192.0.2.1", "disabled": False}],
+            },
         ],
     }
     with patch("powerdns_api_proxy.proxy.pdns", fake):
@@ -217,7 +242,9 @@ def client(tmp_path, fake_pdns) -> Generator[TestClient, None, None]:
     install_test_jwks(rt.oidc)
     asyncio.run(rt.mapping.load())
     asyncio.run(
-        rt.mapping.replace(0, {"alice": ["kunde.example"], "bob": ["bob.example"]}, "test-seed")
+        rt.mapping.replace(
+            0, {"alice": ["kunde.example"], "bob": ["bob.example"]}, "test-seed"
+        )
     )
     runtime_mod._runtime = rt
     from powerdns_api_proxy.proxy import app
@@ -225,7 +252,9 @@ def client(tmp_path, fake_pdns) -> Generator[TestClient, None, None]:
     with (
         patch("powerdns_api_proxy.config.load_config", return_value=config),
         patch("powerdns_api_proxy.middleware.load_config", return_value=config),
-        patch("powerdns_api_proxy.inberlin.middleware.load_config", return_value=config),
+        patch(
+            "powerdns_api_proxy.inberlin.middleware.load_config", return_value=config
+        ),
     ):
         yield TestClient(app)
     runtime_mod._runtime = None

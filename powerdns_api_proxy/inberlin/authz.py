@@ -1,6 +1,6 @@
-"""Ephemeral environment synthesis for Teilnehmer-scoped identities.
+"""Ephemeral environment synthesis for User-scoped identities.
 
-For an identity with an effective Teilnehmer, builds an upstream
+For an identity with an effective User, builds an upstream
 ProxyConfigEnvironment on the fly from the live mapping view: every owned zone
 becomes a zone entry with subzones=True and full record access; override
 grants included; deny-set zones excluded by owner resolution. Admin OIDC
@@ -21,14 +21,12 @@ from powerdns_api_proxy.models import ProxyConfigEnvironment, ProxyConfigZone
 _PLACEHOLDER_HASH = "0" * 128
 
 
-def environment_for_teilnehmer(
-    teilnehmer: str, view: MappingView
-) -> ProxyConfigEnvironment:
+def environment_for_user(user: str, view: MappingView) -> ProxyConfigEnvironment:
     zones = []
-    for zone in sorted(view.zones_for(teilnehmer)):
+    for zone in sorted(view.zones_for(user)):
         # owner_of re-checks deny set and override precedence: a zone listed in
         # the mapping but overridden away or denied must not be granted.
-        if view.owner_of(zone) != teilnehmer:
+        if view.owner_of(zone) != user:
             continue
         zones.append(
             ProxyConfigZone(
@@ -39,7 +37,7 @@ def environment_for_teilnehmer(
             )
         )
     return ProxyConfigEnvironment(
-        name=f"tn:{teilnehmer}",
+        name=f"tn:{user}",
         token_sha512=_PLACEHOLDER_HASH,
         zones=zones,
     )
@@ -49,7 +47,11 @@ def environment_for_admin(identity: Identity) -> ProxyConfigEnvironment:
     return ProxyConfigEnvironment(
         name=f"admin:{identity.actor}",
         token_sha512=_PLACEHOLDER_HASH,
-        zones=[ProxyConfigZone(name=".*", regex=True, admin=True, subzones=True, cryptokeys=True)],
+        zones=[
+            ProxyConfigZone(
+                name=".*", regex=True, admin=True, subzones=True, cryptokeys=True
+            )
+        ],
         global_search=True,
         global_cryptokeys=True,
         global_tsigkeys=True,

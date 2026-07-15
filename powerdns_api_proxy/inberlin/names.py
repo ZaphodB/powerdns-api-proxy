@@ -1,4 +1,4 @@
-"""Canonicalization and label-boundary matching for zones and Teilnehmer ids.
+"""Canonicalization and label-boundary matching for zones and User ids.
 
 Authorization must never use raw string suffix matching (docs/authz-flow.md §5).
 """
@@ -7,7 +7,7 @@ import unicodedata
 
 
 def canonical_tn(name: str) -> str:
-    """Canonical Teilnehmer identifier: NFC, lowercase, stripped."""
+    """Canonical User identifier: NFC, lowercase, stripped."""
     return unicodedata.normalize("NFC", name.strip()).lower()
 
 

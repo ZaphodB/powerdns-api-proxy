@@ -1,4 +1,4 @@
-"""In-memory Teilnehmer→zones mapping with generation CAS and atomic swap.
+"""In-memory User→zones mapping with generation CAS and atomic swap.
 
 The dict reference swap is atomic under CPython/asyncio; readers never lock.
 SQLite persistence happens in the same Store transaction that bumps the
@@ -27,9 +27,9 @@ class MappingView:
     overrides: dict[str, str]  # canonical zone -> canonical tn
     deny_zones: tuple[str, ...] = ()
 
-    def zones_for(self, teilnehmer: str) -> set[str]:
-        """Mapped zones plus override grants for a Teilnehmer (canonical)."""
-        tn = canonical_tn(teilnehmer)
+    def zones_for(self, user: str) -> set[str]:
+        """Mapped zones plus override grants for a User (canonical)."""
+        tn = canonical_tn(user)
         zones = set(self.zones_by_tn.get(tn, frozenset()))
         zones.update(z for z, owner in self.overrides.items() if owner == tn)
         return zones
@@ -143,14 +143,16 @@ class MappingState:
                     if not current[ctn]:
                         del current[ctn]
             new_gen = await self._store.save_mapping(
-                expected_generation, current, actor,
+                expected_generation,
+                current,
+                actor,
                 {"patch": {"add": add, "remove": remove}},
             )
             self.view = self._build(new_gen, current, dict(self.view.overrides))
             return new_gen
 
     async def add_override(
-        self, zone: str, teilnehmer: str, actor: str, note: Optional[str]
+        self, zone: str, user: str, actor: str, note: Optional[str]
     ) -> int:
         """Persist an override grant and republish the view atomically.
 
@@ -158,7 +160,7 @@ class MappingState:
         committed-but-not-yet-published override state is exactly the window
         a concurrent mapping update would clobber."""
         async with self._mutation_lock:
-            override_id = await self._store.add_override(zone, teilnehmer, actor, note)
+            override_id = await self._store.add_override(zone, user, actor, note)
             await self._reload_locked()
             return override_id
 
@@ -173,6 +175,7 @@ class MappingState:
     def orphaned_overrides(self) -> list[str]:
         """Override zones whose grantee has no mapping entry at all."""
         return [
-            z for z, tn in self.view.overrides.items()
+            z
+            for z, tn in self.view.overrides.items()
             if tn not in self.view.zones_by_tn
         ]
