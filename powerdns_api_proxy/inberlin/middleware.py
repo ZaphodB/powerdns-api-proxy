@@ -131,7 +131,11 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             static_env = _static_env_for_token(config, api_key)
             if static_env is not None:
                 roles = runtime.env_roles(static_env.name)
-                if "webui" in roles and x_tn:
+                if "webui" in roles:
+                    # The shared UI token is act-as ONLY: without X-Teilnehmer it
+                    # must never fall through to the plain static environment,
+                    # and its source-IP binding applies to every use — a stolen
+                    # token from a foreign host gets nothing, headers or not.
                     allowed = runtime.settings.webui_source_ips
                     client_ip = request.client.host if request.client else None
                     if allowed and client_ip not in allowed:
@@ -139,6 +143,8 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                             f"webui act-as token used from unauthorized source {client_ip}"
                         )
                         return _error(403, "webui token not valid from this source")
+                    if not x_tn:
+                        return _error(403, "webui token requires X-Teilnehmer")
                     identity = Identity(
                         kind="webui-act-as",
                         actor=static_env.name,

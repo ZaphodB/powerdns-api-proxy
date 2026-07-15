@@ -56,11 +56,11 @@ def test_impersonate_header_forbidden_for_plain_static(client):
     assert r.status_code == 403
 
 
-def test_webui_without_tn_header_is_plain_static(client):
+def test_webui_without_tn_header_403(client):
+    # the shared UI token is act-as ONLY: it must never resolve to the plain
+    # static environment (which would bypass the per-TN authz boundary)
     r = client.get("/proxy/v1/whoami", headers={"X-API-Key": WEBUI_TOKEN})
-    assert r.status_code == 200
-    assert r.json()["kind"] == "static"
-    assert r.json()["effective_teilnehmer"] is None
+    assert r.status_code == 403
 
 
 # -- act-as authorization -----------------------------------------------------
@@ -365,6 +365,10 @@ def test_webui_token_bound_to_source_ip(client):
     try:
         r = client.get(ZONES_PATH, headers=act_as("alice"))
         assert r.status_code == 403
+        # the binding also applies WITHOUT act-as headers — a stolen token
+        # from a foreign host must get nothing in any form
+        r = client.get("/proxy/v1/whoami", headers={"X-API-Key": WEBUI_TOKEN})
+        assert r.status_code == 403
         rt.settings.webui_source_ips = ["testclient"]
         assert client.get(ZONES_PATH, headers=act_as("alice")).status_code == 200
     finally:
@@ -434,3 +438,43 @@ def test_nondict_json_body_not_500(client):
         content="[1, 2]",
     )
     assert r.status_code != 500
+
+
+# -- round-7 regressions: zone-op rollback drift ----------------------------------
+
+def test_zone_create_rollback_drift_409(client, fake_pdns):
+    r = client.post("/proxy/v1/register", headers=REG,
+                    json={"zone": "drifty.example", "teilnehmer": "carol"})
+    assert r.status_code == 201
+    entry_id = r.json()["journal_id"]
+
+    # the zone gains a record after creation — rollback must not delete it
+    fake_pdns.zones["drifty.example."]["rrsets"].append(
+        {"name": "www.drifty.example.", "type": "A", "ttl": 300,
+         "records": [{"content": "192.0.2.5", "disabled": False}]})
+
+    r = client.post(f"/proxy/v1/journal/{entry_id}/rollback",
+                    headers={"X-API-Key": ADMIN_TOKEN})
+    assert r.status_code == 409
+    assert "drifty.example." in fake_pdns.zones
+
+    # admin force overrides the drift check
+    r = client.post(f"/proxy/v1/journal/{entry_id}/rollback",
+                    headers={"X-API-Key": ADMIN_TOKEN}, json={"force": True})
+    assert r.status_code == 200
+    assert "drifty.example." not in fake_pdns.zones
+
+
+def test_zone_delete_rollback_recreated_409(client, fake_pdns):
+    r = client.delete(f"{ZONES_PATH}/kunde.example.", headers=act_as("alice"))
+    assert r.status_code == 204
+    entry = client.get("/proxy/v1/journal", headers=act_as("alice")).json()["entries"][0]
+
+    # zone comes back out-of-band — recreate-rollback must not clobber it
+    fake_pdns.zones["kunde.example."] = {
+        "id": "kunde.example.", "name": "kunde.example.", "kind": "Native",
+        "rrsets": [],
+    }
+    r = client.post(f"/proxy/v1/journal/{entry['id']}/rollback",
+                    headers=act_as("alice"))
+    assert r.status_code == 409

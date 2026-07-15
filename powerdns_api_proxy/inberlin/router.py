@@ -3,6 +3,7 @@ identity, health/ready, reload (docs/api-contract.md)."""
 
 import asyncio
 import dataclasses
+import json
 import sqlite3
 from typing import Optional
 
@@ -22,6 +23,7 @@ from powerdns_api_proxy.inberlin.rollback import (
     NotRollbackable,
     build_rollback_request,
     check_drift,
+    zone_state_drift,
 )
 from powerdns_api_proxy.inberlin.runtime import Runtime, get_runtime
 from powerdns_api_proxy.inberlin.store import GenerationMismatch, KeyLimitReached
@@ -155,12 +157,11 @@ async def create_override(body: OverrideCreate):
     _require_admin(identity)
     zone = canonical_zone(body.zone)
     try:
-        override_id = await rt.store.add_override(
+        override_id = await rt.mapping.add_override(
             zone, canonical_tn(body.teilnehmer), identity.actor, body.note
         )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "override for this zone already exists")
-    await rt.mapping.reload_overrides()
     return {"id": override_id, "zone": zone}
 
 
@@ -168,9 +169,8 @@ async def create_override(body: OverrideCreate):
 async def delete_override(override_id: int):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
-    if not await rt.store.delete_override(override_id):
+    if not await rt.mapping.delete_override(override_id):
         raise HTTPException(404, "override not found")
-    await rt.mapping.reload_overrides()
     return {"deleted": override_id}
 
 
@@ -302,11 +302,30 @@ async def rollback_journal_entry(
     # sit INSIDE the lock: a concurrent write between check and apply would
     # make the rollback silently clobber it.
     async with rt.zone_lock(canonical_zone(entry["zone"])):
-        if entry["operation"] == "rrset-patch" and not body.force:
+        if not body.force:
+            # Every rollbackable operation gets a drift check, not just RRset
+            # patches: deleting a zone that changed since creation, or
+            # recreating one that already exists again, silently destroys
+            # someone else's later work.
             try:
-                drift = await check_drift(
-                    pdns, server_id, entry["zone"], entry["rrsets"]
-                )
+                if entry["operation"] == "rrset-patch":
+                    drift = await check_drift(
+                        pdns, server_id, entry["zone"], entry["rrsets"]
+                    )
+                elif entry["operation"] == "zone-create":
+                    live = await fetch_zone(pdns, server_id, entry["zone"])
+                    after = (
+                        json.loads(entry["after_state"])
+                        if entry.get("after_state") else None
+                    )
+                    drift = zone_state_drift(live, after)
+                elif entry["operation"] == "zone-delete":
+                    live = await fetch_zone(pdns, server_id, entry["zone"])
+                    drift = [] if live is None else [
+                        "zone was recreated since this entry"
+                    ]
+                else:
+                    drift = []
             except RuntimeError:
                 raise HTTPException(502, "upstream unavailable, cannot verify drift")
             if drift:

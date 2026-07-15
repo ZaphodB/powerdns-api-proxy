@@ -89,6 +89,23 @@ async def check_drift(
     return drift
 
 
+def zone_state_drift(live: Optional[dict], recorded_after: Optional[dict]) -> list[str]:
+    """Drift between a live zone and a recorded whole-zone after-state
+    (zone-create rollback: the zone about to be deleted must still look
+    exactly like it did right after creation)."""
+    if live is None:
+        return ["zone no longer exists"]
+    if not recorded_after:
+        return ["no recorded after-state to compare against"]
+    live_map = rrsets_by_key(live)
+    rec_map = rrsets_by_key(recorded_after)
+    drift = []
+    for key in sorted(set(live_map) | set(rec_map)):
+        if _normalize_rrset(live_map.get(key)) != _normalize_rrset(rec_map.get(key)):
+            drift.append(f"{key[0]}/{key[1]} changed since this entry")
+    return drift
+
+
 def build_rollback_request(entry: dict) -> tuple[str, str, Optional[dict[str, Any]]]:
     """Returns (method, path_suffix, body) to execute against /api/v1.
 

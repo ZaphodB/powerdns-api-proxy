@@ -202,3 +202,29 @@ def test_journal_query_limit_clamped(store):
     # SQLite treats LIMIT -1 as unlimited — the store must clamp
     assert len(run(store.journal_query(limit=-1))) == 1
     assert len(run(store.journal_query(limit=2))) == 2
+
+
+def test_mapping_and_override_updates_serialized(store):
+    """Round-7 regression: concurrent mapping replace and override add must
+    both land in the final view — before the mutation lock, the interleaved
+    store-read -> view-swap sequences could publish a view built from stale
+    data, silently dropping one of the updates."""
+    state = MappingState(store, [])
+    run(state.load())
+    run(state.replace(0, {"alice": ["a.example"]}, "t"))
+
+    async def scenario():
+        await asyncio.gather(
+            state.add_override("ov.example.", "bob", "t", None),
+            state.replace(1, {"carol": ["c.example"]}, "t"),
+        )
+
+    run(scenario())
+    # final view reflects BOTH the newest mapping and the override
+    assert state.view.owner_of("c.example.") == "carol"
+    assert state.view.owner_of("a.example.") is None
+    assert state.view.owner_of("ov.example.") == "bob"
+    # and matches what the store has on disk
+    gen, mapping, overrides = run(store.load_mapping())
+    assert gen == state.view.generation == 2
+    assert overrides == {"ov.example.": "bob"}
