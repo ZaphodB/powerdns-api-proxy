@@ -154,16 +154,15 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                         return _error(403, "webui token not valid from this source")
                     if not x_tn:
                         return _error(403, "webui token requires X-Teilnehmer")
+                    tn_value = canonical_tn(x_tn)
                     identity = Identity(
                         kind="webui-act-as",
                         actor=static_env.name,
-                        effective_teilnehmer=canonical_tn(x_tn),
+                        effective_teilnehmer=tn_value,
                         webui_user=x_webui_user,
                         roles=roles,
                     )
-                    environment = environment_for_user(
-                        identity.effective_teilnehmer, runtime.mapping.view
-                    )
+                    environment = environment_for_user(tn_value, runtime.mapping.view)
                 elif x_tn or x_imp:
                     return _error(
                         403, "identity headers not allowed for this credential"
@@ -189,8 +188,10 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 identity = Identity(kind="tn-key", actor=tn, effective_teilnehmer=tn)
                 environment = environment_for_user(tn, runtime.mapping.view)
         else:
-            if runtime.oidc is None:
+            if runtime.oidc is None or runtime.settings.oidc is None:
                 return _error(401, "OIDC not configured")
+            if bearer is None:
+                return _error(401, "Unauthorized")
             try:
                 claims = await runtime.oidc.validate(bearer)
             except Exception as e:
@@ -206,17 +207,16 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             if x_imp:
                 if not is_admin:
                     return _error(403, "impersonation requires admin group")
+                tn_value = canonical_tn(x_imp)
                 identity = Identity(
                     kind="oidc",
                     actor=sub,
                     display=username,
-                    effective_teilnehmer=canonical_tn(x_imp),
+                    effective_teilnehmer=tn_value,
                     impersonator=sub,
                     is_admin=True,
                 )
-                environment = environment_for_user(
-                    identity.effective_teilnehmer, runtime.mapping.view
-                )
+                environment = environment_for_user(tn_value, runtime.mapping.view)
             elif is_admin:
                 identity = Identity(
                     kind="oidc", actor=sub, display=username, is_admin=True

@@ -469,7 +469,8 @@ class Store:
 
         def run(c: sqlite3.Connection):
             sql = "SELECT DISTINCT j.* FROM journal j"
-            where, params = [], []
+            where: list[str] = []
+            params: list[Any] = []
             if name or rtype:
                 sql += " JOIN journal_rrset r ON r.journal_id = j.id"
                 if name:
