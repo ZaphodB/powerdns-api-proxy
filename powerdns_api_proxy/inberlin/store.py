@@ -112,6 +112,9 @@ class Store:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._local = threading.local()
+        # executor threads outlive the Store (and tests create many Stores) —
+        # track read connections so close() can release them deterministically
+        self._read_conns: list[sqlite3.Connection] = []
 
     def _read_conn(self) -> sqlite3.Connection:
         """Per-thread read connection (asyncio.to_thread pool threads)."""
@@ -121,9 +124,16 @@ class Store:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=5000")
             self._local.conn = conn
+            self._read_conns.append(conn)
         return conn
 
     def close(self) -> None:
+        for conn in self._read_conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._read_conns.clear()
         self._conn.close()
 
     async def _write(self, fn: Callable[[sqlite3.Connection], Any]) -> Any:

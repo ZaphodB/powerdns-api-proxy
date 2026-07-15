@@ -35,14 +35,21 @@ class OIDCValidator:
                 data = await resp.json()
         return data["jwks_uri"]
 
-    async def _refresh(self, force: bool = False) -> None:
+    async def _refresh(self) -> None:
         """Fetch JWKS and replace the key cache wholesale (no stale merge)."""
         async with self._refresh_lock:
-            # single-flight collapse of concurrent refreshes, but an unknown-kid
-            # refresh (force) must not be suppressed just because a TTL refresh
-            # ran seconds ago — key rotation would 401 valid tokens for ~5s.
-            if not force and time.monotonic() - self._fetched_at < 5:
+            # Unconditional single-flight cooldown: a refresh <5s ago already
+            # has the current key set, so re-fetching for an unknown kid is
+            # pointless — and forged kids in unverified JWT headers must not
+            # be able to drive unlimited fetches at the IdP. Cost: a token
+            # signed with a just-rotated key may 401 for up to 5s (retry
+            # succeeds).
+            if time.monotonic() - self._fetched_at < 5:
                 return
+            # stamp BEFORE the fetch: a failing IdP must not disable the
+            # cooldown, or forged-kid spam degrades into back-to-back
+            # fetch attempts (10s timeout each) while the IdP is down
+            self._fetched_at = time.monotonic()
             url = await self._jwks_url()
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -59,7 +66,6 @@ class OIDCValidator:
                 if k.get("kid"):
                     keys[k["kid"]] = key
             self._jwks = keys
-            self._fetched_at = time.monotonic()
             logger.info(f"JWKS refreshed, {len(keys)} signing keys")
 
     async def _key_for(self, kid: str) -> Optional[PyJWK]:
@@ -69,9 +75,8 @@ class OIDCValidator:
             if stale:
                 await self._refresh()
             return self._jwks.get(kid)
-        # unknown kid: force a refresh (bypasses the TTL single-flight window),
-        # then look again — collapse handled by the refresh lock re-check.
-        await self._refresh(force=True)
+        # unknown kid: refresh (subject to the 5s cooldown) and look again.
+        await self._refresh()
         return self._jwks.get(kid)
 
     async def validate(self, token: str) -> dict[str, Any]:

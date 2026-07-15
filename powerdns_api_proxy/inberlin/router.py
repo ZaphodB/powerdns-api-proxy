@@ -1,6 +1,7 @@
 """/proxy/v1 router: mapping, overrides, journal, rollback, register, keys,
 identity, health/ready, reload (docs/api-contract.md)."""
 
+import asyncio
 import dataclasses
 import sqlite3
 from typing import Optional
@@ -543,7 +544,8 @@ async def ready():
 async def admin_reload():
     _identity_admin()
     from powerdns_api_proxy.inberlin.reload import reload_static_config
-    reload_static_config()
+    # sync file read + YAML parse — keep it off the event loop
+    await asyncio.to_thread(reload_static_config)
     return {"reloaded": True}
 
 

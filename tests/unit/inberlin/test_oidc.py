@@ -93,3 +93,28 @@ def test_token_without_kid_rejected(rsa_key):
     )
     with pytest.raises(ValueError, match="kid"):
         asyncio.run(v.validate(token))
+
+
+def test_unknown_kid_refresh_cooldown(rsa_key, monkeypatch):
+    # forged kids must not drive unlimited JWKS fetches — even when the
+    # fetch itself fails (IdP down), the cooldown clock still advances
+    v = make_validator(rsa_key)
+    fetches = []
+
+    async def failing_jwks_url():
+        fetches.append(1)
+        raise RuntimeError("idp down")
+
+    monkeypatch.setattr(v, "_jwks_url", failing_jwks_url)
+
+    # cooldown active from make_validator's fresh _fetched_at → no fetch
+    asyncio.run(v._refresh())
+    assert fetches == []
+    # expire the cooldown, spam refreshes: exactly ONE fetch attempt goes out
+    v._fetched_at = time.monotonic() - 10
+    for _ in range(5):
+        try:
+            asyncio.run(v._refresh())
+        except RuntimeError:
+            pass
+    assert len(fetches) == 1
