@@ -273,6 +273,10 @@ class JournalMiddleware(BaseHTTPMiddleware):
                 body = json.loads(body_bytes)
             except json.JSONDecodeError:
                 body = None
+        if not isinstance(body, dict):
+            # A top-level array/scalar is never a valid pdns body; capture
+            # code assumes dict-or-None. Upstream rejects the request itself.
+            body = None
 
         from powerdns_api_proxy.proxy import pdns  # circular at import time
         capture = JournalCapture(

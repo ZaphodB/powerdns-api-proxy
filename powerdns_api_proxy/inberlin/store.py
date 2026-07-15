@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS journal (
 CREATE INDEX IF NOT EXISTS journal_zone_ts ON journal(zone, ts);
 CREATE INDEX IF NOT EXISTS journal_tn_ts ON journal(teilnehmer, ts);
 CREATE INDEX IF NOT EXISTS journal_status ON journal(status);
+CREATE INDEX IF NOT EXISTS journal_rollback_of ON journal(rollback_of);
 CREATE TABLE IF NOT EXISTS journal_rrset (
   id INTEGER PRIMARY KEY,
   journal_id INTEGER NOT NULL REFERENCES journal(id),

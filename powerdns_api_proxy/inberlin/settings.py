@@ -68,7 +68,7 @@ def load_inberlin_settings(path: Optional[Path] = None) -> Optional[InBerlinSett
         if not env_path:
             return None
         path = Path(env_path)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = safe_load(f) or {}
     block = data.get("inberlin")
     if not block:

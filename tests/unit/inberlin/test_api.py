@@ -414,3 +414,23 @@ def test_ready_admin_only_and_reports(client):
     body = r.json()
     assert body["upstream"] and body["journal_writable"]
     assert body["mapping_generation"] == 1
+
+
+# -- kimi round regressions ---------------------------------------------------
+
+def test_create_override_duplicate_409(client):
+    admin = {"X-API-Key": ADMIN_TOKEN}
+    body = {"zone": "sub.kunde.example.", "teilnehmer": "bob"}
+    assert client.post("/proxy/v1/overrides", headers=admin, json=body).status_code == 201
+    # UNIQUE(zone) violation must surface as a conflict, not a 500
+    assert client.post("/proxy/v1/overrides", headers=admin, json=body).status_code == 409
+
+
+def test_nondict_json_body_not_500(client):
+    # top-level JSON array: capture code must not crash on body.get()
+    r = client.patch(
+        f"{ZONES_PATH}/kunde.example.",
+        headers={**act_as("alice"), "Content-Type": "application/json"},
+        content="[1, 2]",
+    )
+    assert r.status_code != 500

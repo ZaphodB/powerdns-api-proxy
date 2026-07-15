@@ -2,6 +2,7 @@
 identity, health/ready, reload (docs/api-contract.md)."""
 
 import dataclasses
+import sqlite3
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -152,9 +153,12 @@ async def create_override(body: OverrideCreate):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
     zone = canonical_zone(body.zone)
-    override_id = await rt.store.add_override(
-        zone, canonical_tn(body.teilnehmer), identity.actor, body.note
-    )
+    try:
+        override_id = await rt.store.add_override(
+            zone, canonical_tn(body.teilnehmer), identity.actor, body.note
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "override for this zone already exists")
     await rt.mapping.reload_overrides()
     return {"id": override_id, "zone": zone}
 
@@ -298,7 +302,12 @@ async def rollback_journal_entry(
     # make the rollback silently clobber it.
     async with rt.zone_lock(canonical_zone(entry["zone"])):
         if entry["operation"] == "rrset-patch" and not body.force:
-            drift = await check_drift(pdns, server_id, entry["zone"], entry["rrsets"])
+            try:
+                drift = await check_drift(
+                    pdns, server_id, entry["zone"], entry["rrsets"]
+                )
+            except RuntimeError:
+                raise HTTPException(502, "upstream unavailable, cannot verify drift")
             if drift:
                 raise HTTPException(409, "state drifted: " + "; ".join(drift))
         try:
@@ -351,7 +360,11 @@ async def register_zone(body: RegisterBody):
 
     from powerdns_api_proxy.proxy import pdns
     server_id = rt.settings.upstream_server_id
-    if await fetch_zone(pdns, server_id, zone) is not None:
+    try:
+        exists = await fetch_zone(pdns, server_id, zone)
+    except RuntimeError:
+        raise HTTPException(503, "upstream unavailable, cannot verify zone existence")
+    if exists is not None:
         raise HTTPException(409, "zone already exists upstream")
 
     payload = {"name": zone, "kind": reg.kind, "nameservers": reg.nameservers}
