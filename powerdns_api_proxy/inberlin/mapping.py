@@ -26,6 +26,7 @@ class MappingView:
     zones_by_tn: dict[str, frozenset[str]]
     overrides: dict[str, str]  # canonical zone -> canonical tn
     deny_zones: tuple[str, ...] = ()
+    applied_at: str = ""  # commit timestamp of generation; "" for empty store
 
     def zones_for(self, user: str) -> set[str]:
         """Mapped zones plus override grants for a User (canonical)."""
@@ -85,11 +86,15 @@ class MappingState:
 
     async def _reload_locked(self) -> None:
         """Rebuild the view from the store; caller must hold _mutation_lock."""
-        generation, mapping, overrides = await self._store.load_mapping()
-        self.view = self._build(generation, mapping, overrides)
+        generation, applied_at, mapping, overrides = await self._store.load_mapping()
+        self.view = self._build(generation, mapping, overrides, applied_at)
 
     def _build(
-        self, generation: int, mapping: dict[str, set[str]], overrides: dict[str, str]
+        self,
+        generation: int,
+        mapping: dict[str, set[str]],
+        overrides: dict[str, str],
+        applied_at: str = "",
     ) -> MappingView:
         """Canonicalize all names once at build time so lookups stay cheap."""
         return MappingView(
@@ -102,6 +107,7 @@ class MappingState:
                 canonical_zone(z): canonical_tn(tn) for z, tn in overrides.items()
             },
             deny_zones=self._deny,
+            applied_at=applied_at,
         )
 
     async def replace(
@@ -113,13 +119,15 @@ class MappingState:
             for tn, zones in mapping.items()
         }
         async with self._mutation_lock:
-            new_gen = await self._store.save_mapping(
+            new_gen, applied_at = await self._store.save_mapping(
                 expected_generation, normalized, actor, {"mapping": mapping}
             )
             # Overrides live in a separate table untouched by save_mapping; reuse
             # the current in-memory copy so a transient read failure can't leave
             # memory behind the committed generation.
-            self.view = self._build(new_gen, normalized, dict(self.view.overrides))
+            self.view = self._build(
+                new_gen, normalized, dict(self.view.overrides), applied_at
+            )
             return new_gen
 
     async def patch(
@@ -142,35 +150,54 @@ class MappingState:
                     current[ctn] -= {canonical_zone(z) for z in zones}
                     if not current[ctn]:
                         del current[ctn]
-            new_gen = await self._store.save_mapping(
+            new_gen, applied_at = await self._store.save_mapping(
                 expected_generation,
                 current,
                 actor,
                 {"patch": {"add": add, "remove": remove}},
             )
-            self.view = self._build(new_gen, current, dict(self.view.overrides))
+            self.view = self._build(
+                new_gen, current, dict(self.view.overrides), applied_at
+            )
             return new_gen
 
     async def add_override(
-        self, zone: str, user: str, actor: str, note: Optional[str]
-    ) -> int:
+        self,
+        expected_generation: int,
+        zone: str,
+        user: str,
+        actor: str,
+        note: Optional[str],
+    ) -> tuple[int, int]:
         """Persist an override grant and republish the view atomically.
 
-        The store write must happen under the same lock as the view swap:
+        CAS on the shared generation (docs/api-contract.md line 41): the grant
+        and the generation bump commit in one store transaction, so an
+        override racing an exporter full-replace loses with a 409 instead of
+        silently applying against a mapping the admin hadn't seen. The store
+        write must happen under the same lock as the view swap:
         committed-but-not-yet-published override state is exactly the window
-        a concurrent mapping update would clobber."""
+        a concurrent mapping update would clobber.
+        Returns (override_id, new generation)."""
         async with self._mutation_lock:
-            override_id = await self._store.add_override(zone, user, actor, note)
+            override_id, new_gen = await self._store.add_override(
+                zone, user, actor, note, expected_generation
+            )
             await self._reload_locked()
-            return override_id
+            return override_id, new_gen
 
-    async def delete_override(self, override_id: int) -> bool:
-        """Delete an override grant and republish the view atomically."""
+    async def delete_override(
+        self, expected_generation: int, override_id: int, actor: str
+    ) -> tuple[bool, int]:
+        """Delete an override grant and republish the view atomically.
+        Returns (deleted, new-or-current generation)."""
         async with self._mutation_lock:
-            deleted = await self._store.delete_override(override_id)
+            deleted, new_gen = await self._store.delete_override(
+                override_id, expected_generation, actor
+            )
             if deleted:
                 await self._reload_locked()
-            return deleted
+            return deleted, new_gen
 
     def orphaned_overrides(self) -> list[str]:
         """Override zones whose grantee has no mapping entry at all."""

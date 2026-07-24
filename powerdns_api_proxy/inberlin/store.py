@@ -94,6 +94,29 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _bump_generation(
+    c: sqlite3.Connection, expected_generation: int, actor: str, payload: dict
+) -> tuple[int, str]:
+    """CAS-check expected vs current generation and commit the next snapshot
+    row. Shared by mapping and override writes: both race the exporter's
+    full-replace, so both CAS and bump the same sequence (docs/api-contract.md
+    lines 36-42). Caller holds the write transaction."""
+    row = c.execute(
+        "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
+    ).fetchone()
+    current = row["generation"] if row else 0
+    if current != expected_generation:
+        raise GenerationMismatch(current)
+    new_gen = current + 1
+    applied_at = _utcnow()
+    c.execute(
+        "INSERT INTO mapping_snapshot (generation, applied_at, actor, payload)"
+        " VALUES (?, ?, ?, ?)",
+        (new_gen, applied_at, actor, json.dumps(payload)),
+    )
+    return new_gen, applied_at
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
@@ -169,14 +192,21 @@ class Store:
 
     # -- mapping ----------------------------------------------------------
 
-    async def load_mapping(self) -> tuple[int, dict[str, set[str]], dict[str, str]]:
-        """Returns (generation, {tn: {zones}}, {override_zone: tn})."""
+    async def load_mapping(
+        self,
+    ) -> tuple[int, str, dict[str, set[str]], dict[str, str]]:
+        """Returns (generation, applied_at, {tn: {zones}}, {override_zone: tn}).
+
+        applied_at is the commit timestamp of the latest generation ("" for an
+        empty store)."""
 
         def run(c: sqlite3.Connection):
             row = c.execute(
-                "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
+                "SELECT generation, applied_at FROM mapping_snapshot"
+                " ORDER BY generation DESC LIMIT 1"
             ).fetchone()
             generation = row["generation"] if row else 0
+            applied_at = row["applied_at"] if row else ""
             mapping: dict[str, set[str]] = {}
             for r in c.execute("SELECT user, zone FROM mapping_entry"):
                 mapping.setdefault(r["user"], set()).add(r["zone"])
@@ -184,7 +214,7 @@ class Store:
                 r["zone"]: r["user"]
                 for r in c.execute("SELECT zone, user FROM override_grant")
             }
-            return generation, mapping, overrides
+            return generation, applied_at, mapping, overrides
 
         return await self._read(run)
 
@@ -194,28 +224,21 @@ class Store:
         mapping: dict[str, set[str]],
         actor: str,
         payload: dict,
-    ) -> int:
-        """CAS write of the full normalized mapping. Returns new generation."""
+    ) -> tuple[int, str]:
+        """CAS write of the full normalized mapping.
 
-        def run(c: sqlite3.Connection) -> int:
-            row = c.execute(
-                "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
-            ).fetchone()
-            current = row["generation"] if row else 0
-            if current != expected_generation:
-                raise GenerationMismatch(current)
-            new_gen = current + 1
-            c.execute(
-                "INSERT INTO mapping_snapshot (generation, applied_at, actor, payload)"
-                " VALUES (?, ?, ?, ?)",
-                (new_gen, _utcnow(), actor, json.dumps(payload)),
+        Returns (new generation, applied_at)."""
+
+        def run(c: sqlite3.Connection) -> tuple[int, str]:
+            new_gen, applied_at = _bump_generation(
+                c, expected_generation, actor, payload
             )
             c.execute("DELETE FROM mapping_entry")
             c.executemany(
                 "INSERT INTO mapping_entry (user, zone) VALUES (?, ?)",
                 [(tn, z) for tn, zones in mapping.items() for z in zones],
             )
-            return new_gen
+            return new_gen, applied_at
 
         return await self._write(run)
 
@@ -229,22 +252,58 @@ class Store:
         )
 
     async def add_override(
-        self, zone: str, user: str, created_by: str, note: str | None
-    ) -> int:
-        def run(c: sqlite3.Connection) -> int:
+        self,
+        zone: str,
+        user: str,
+        created_by: str,
+        note: str | None,
+        expected_generation: int,
+    ) -> tuple[int, int]:
+        """Insert an override grant and bump the shared mapping generation in
+        the same transaction. Returns (override_id, new generation)."""
+
+        def run(c: sqlite3.Connection) -> tuple[int, int]:
+            new_gen, _ = _bump_generation(
+                c,
+                expected_generation,
+                created_by,
+                {"override_add": {"zone": zone, "user": user, "note": note}},
+            )
             cur = c.execute(
                 "INSERT INTO override_grant (zone, user, created_by, created_at, note)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (zone, user, created_by, _utcnow(), note),
             )
-            return int(cur.lastrowid or 0)
+            return int(cur.lastrowid or 0), new_gen
 
         return await self._write(run)
 
-    async def delete_override(self, override_id: int) -> bool:
-        def run(c: sqlite3.Connection) -> bool:
+    async def delete_override(
+        self, override_id: int, expected_generation: int, actor: str
+    ) -> tuple[bool, int]:
+        """Delete an override grant, bumping the generation only when a row was
+        actually removed. Returns (deleted, new-or-current generation).
+        A stale generation raises GenerationMismatch even for a missing id —
+        the caller's view of the mapping is out of date either way."""
+
+        def run(c: sqlite3.Connection) -> tuple[bool, int]:
+            row = c.execute(
+                "SELECT generation FROM mapping_snapshot"
+                " ORDER BY generation DESC LIMIT 1"
+            ).fetchone()
+            current = row["generation"] if row else 0
+            if current != expected_generation:
+                raise GenerationMismatch(current)
             cur = c.execute("DELETE FROM override_grant WHERE id = ?", (override_id,))
-            return cur.rowcount > 0
+            if cur.rowcount == 0:
+                return False, current
+            new_gen, _ = _bump_generation(
+                c,
+                expected_generation,
+                actor,
+                {"override_delete": {"id": override_id}},
+            )
+            return True, new_gen
 
         return await self._write(run)
 
@@ -318,10 +377,12 @@ class Store:
         )
 
     async def list_keys(self, user: str) -> list[dict]:
+        """Contract shape (docs/api-contract.md): id, prefix, label, ... —
+        the DB column is key_prefix, the wire name is prefix."""
         return await self._read(
             lambda c: [
                 {
-                    k: r[k]
+                    ("prefix" if k == "key_prefix" else k): r[k]
                     for k in (
                         "id",
                         "key_prefix",

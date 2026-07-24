@@ -255,16 +255,28 @@ def test_mapping_and_override_updates_serialized(store):
     """Round-7 regression: concurrent mapping replace and override add must
     both land in the final view — before the mutation lock, the interleaved
     store-read -> view-swap sequences could publish a view built from stale
-    data, silently dropping one of the updates."""
+    data, silently dropping one of the updates. With CAS on the shared
+    generation, one of the two loses the race and must retry against the
+    winner's generation."""
     state = MappingState(store, [])
     run(state.load())
     run(state.replace(0, {"alice": ["a.example"]}, "t"))
 
     async def scenario():
-        await asyncio.gather(
-            state.add_override("ov.example.", "bob", "t", None),
+        results = await asyncio.gather(
+            state.add_override(1, "ov.example.", "bob", "t", None),
             state.replace(1, {"carol": ["c.example"]}, "t"),
+            return_exceptions=True,
         )
+        # exactly one wins the CAS race; the loser retries against the new gen
+        losers = [r for r in results if isinstance(r, GenerationMismatch)]
+        assert len(losers) == 1
+        if isinstance(results[0], GenerationMismatch):
+            await state.add_override(
+                state.view.generation, "ov.example.", "bob", "t", None
+            )
+        else:
+            await state.replace(state.view.generation, {"carol": ["c.example"]}, "t")
 
     run(scenario())
     # final view reflects BOTH the newest mapping and the override
@@ -272,6 +284,7 @@ def test_mapping_and_override_updates_serialized(store):
     assert state.view.owner_of("a.example.") is None
     assert state.view.owner_of("ov.example.") == "bob"
     # and matches what the store has on disk
-    gen, mapping, overrides = run(store.load_mapping())
-    assert gen == state.view.generation == 2
+    gen, applied_at, mapping, overrides = run(store.load_mapping())
+    assert gen == state.view.generation == 3
+    assert applied_at == state.view.applied_at
     assert overrides == {"ov.example.": "bob"}

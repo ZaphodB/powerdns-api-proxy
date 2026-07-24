@@ -128,8 +128,8 @@ async def get_mapping():
     view = rt.mapping.view
     return {
         "generation": view.generation,
+        "applied_at": view.applied_at,
         "mapping": {tn: sorted(zones) for tn, zones in view.zones_by_tn.items()},
-        "overrides": view.overrides,
     }
 
 
@@ -157,26 +157,36 @@ async def list_overrides():
 
 
 @router.post("/overrides", status_code=201)
-async def create_override(body: OverrideCreate):
+async def create_override(body: OverrideCreate, if_match: Optional[str] = Header(None)):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
+    expected = _require_generation(if_match)
     zone = canonical_zone(body.zone)
     try:
-        override_id = await rt.mapping.add_override(
-            zone, canonical_tn(body.user), identity.actor, body.note
+        override_id, generation = await rt.mapping.add_override(
+            expected, zone, canonical_tn(body.user), identity.actor, body.note
         )
+    except GenerationMismatch as e:
+        raise HTTPException(409, f"generation mismatch, current is {e.current}")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "override for this zone already exists")
-    return {"id": override_id, "zone": zone}
+    return {"id": override_id, "zone": zone, "generation": generation}
 
 
 @router.delete("/overrides/{override_id}")
-async def delete_override(override_id: int):
+async def delete_override(override_id: int, if_match: Optional[str] = Header(None)):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
-    if not await rt.mapping.delete_override(override_id):
+    expected = _require_generation(if_match)
+    try:
+        deleted, generation = await rt.mapping.delete_override(
+            expected, override_id, identity.actor
+        )
+    except GenerationMismatch as e:
+        raise HTTPException(409, f"generation mismatch, current is {e.current}")
+    if not deleted:
         raise HTTPException(404, "override not found")
-    return {"deleted": override_id}
+    return {"deleted": override_id, "generation": generation}
 
 
 # -- journal ----------------------------------------------------------------
@@ -240,11 +250,24 @@ async def query_journal(
 
 @router.get("/journal/uncertain")
 async def journal_uncertain():
+    """Pending/uncertain rows plus live upstream state per affected zone
+    (docs/api-contract.md line 46) — reconciliation without manual refetching."""
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
     pending = await rt.store.journal_query(status="pending", limit=500)
     uncertain = await rt.store.journal_query(status="uncertain", limit=500)
-    return {"entries": [_journal_row_public(r) for r in pending + uncertain]}
+    rows = pending + uncertain
+
+    from powerdns_api_proxy.proxy import pdns
+
+    server_id = rt.settings.upstream_server_id
+    upstream: dict[str, Optional[dict]] = {}
+    for zone in {r["zone"] for r in rows} - {"."}:
+        try:
+            upstream[zone] = await fetch_zone(pdns, server_id, zone)
+        except Exception:
+            upstream[zone] = {"error": "upstream fetch failed"}
+    return {"entries": [_journal_row_public(r) for r in rows], "upstream": upstream}
 
 
 @router.get("/journal/{journal_id}")
@@ -366,7 +389,16 @@ async def rollback_journal_entry(
         await capture.finalize(resp.status)
     if resp.status >= 400:
         raise HTTPException(502, f"upstream rejected rollback: {resp.status}")
-    return {"rolled_back": journal_id, "journal_id": capture.journal_id}
+    result: dict[str, object] = {
+        "rolled_back": journal_id,
+        "journal_id": capture.journal_id,
+    }
+    if entry["operation"] == "zone-delete":
+        # Recreate-from-export cannot restore DNSSEC keys or catalog
+        # membership (docs/api-contract.md line 79-80) — flag the loss.
+        result["lossy"] = True
+        result["lossy_detail"] = "DNSSEC and catalog state not restored"
+    return result
 
 
 # -- registration -------------------------------------------------------------

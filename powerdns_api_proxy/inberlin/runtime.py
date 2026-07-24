@@ -2,8 +2,12 @@
 lifespan. None when the `inberlin:` config block is absent (extension off)."""
 
 import asyncio
+import sqlite3
 import weakref
 from typing import Optional
+
+from prometheus_client import REGISTRY
+from prometheus_client.core import GaugeMetricFamily
 
 from powerdns_api_proxy.inberlin.mapping import MappingState
 from powerdns_api_proxy.inberlin.oidc import OIDCValidator
@@ -109,3 +113,33 @@ async def shutdown_runtime() -> None:
     if _runtime:
         await _runtime.stop()
         _runtime = None
+
+
+class _JournalDbSizeCollector:
+    """Journal SQLite size gauge on the upstream /metrics endpoint
+    (docs/api-contract.md lines 57-58). Resolves the runtime at scrape time:
+    absent runtime or unreadable DB yields nothing (absent beats wrong)."""
+
+    def collect(self):
+        rt = get_runtime()
+        if rt is None:
+            return
+        try:
+            conn = sqlite3.connect(rt.settings.state_db)
+            try:
+                pages = conn.execute("PRAGMA page_count").fetchone()[0]
+                page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return
+        yield GaugeMetricFamily(
+            "inberlin_journal_db_bytes",
+            "IN-Berlin journal SQLite database size in bytes",
+            value=pages * page_size,
+        )
+
+
+# Import-time registration: exactly once per process regardless of how many
+# Runtime instances tests create; the collector no-ops while runtime is None.
+REGISTRY.register(_JournalDbSizeCollector())

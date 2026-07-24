@@ -108,7 +108,13 @@ class IdentityMiddleware(BaseHTTPMiddleware):
         x_imp = request.headers.get("x-impersonate-teilnehmer")
         x_webui_user = request.headers.get("x-webui-user")
 
-        for h in ("x-teilnehmer", "x-impersonate-teilnehmer", "x-webui-user"):
+        for h in (
+            "x-api-key",
+            "authorization",
+            "x-teilnehmer",
+            "x-impersonate-teilnehmer",
+            "x-webui-user",
+        ):
             if len(request.headers.getlist(h)) > 1:
                 return _error(400, f"duplicate {h} header")
 
@@ -153,7 +159,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                         )
                         return _error(403, "webui token not valid from this source")
                     if not x_tn:
-                        return _error(403, "webui token requires X-Teilnehmer")
+                        return _error(400, "webui act-as requires X-Teilnehmer")
                     tn_value = canonical_tn(x_tn)
                     identity = Identity(
                         kind="webui-act-as",

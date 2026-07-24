@@ -29,6 +29,7 @@ EXPORTER_TOKEN = "exporter-secret-token"
 ADMIN_TOKEN = "admin-secret-token"
 PLAIN_TOKEN = "plain-static-token"
 REGISTRAR_TOKEN = "registrar-secret-token"
+METRICS_TOKEN = "metrics-secret-token"
 
 
 def sha512(s: str) -> str:
@@ -57,6 +58,9 @@ def make_config() -> ProxyConfig:
             ProxyConfigEnvironment(
                 name="registrar", token_sha512=sha512(REGISTRAR_TOKEN)
             ),
+            ProxyConfigEnvironment(
+                name="metrics", token_sha512=sha512(METRICS_TOKEN), metrics_proxy=True
+            ),
         ],
     )
 
@@ -70,6 +74,7 @@ def make_settings(tmp_path) -> InBerlinSettings:
             "exporter": ["exporter"],
             "infra-admin": ["admin"],
             "registrar": ["registrar"],
+            "metrics": ["metrics"],
         },
         registration=RegistrationSettings(nameservers=["ns1.example.", "ns2.example."]),
         oidc=OIDCSettings(
