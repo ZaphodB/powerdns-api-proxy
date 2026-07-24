@@ -26,7 +26,9 @@ identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
 The webui act-as token is additionally **bound to configured source IPs**
 (`webui_source_ips`): on the WireGuard overlay, cryptokey routing makes peer
 source IPs unforgeable, so the token is unusable from any host but the UI
-host even if leaked. A global mutation rate cap applies across all act-as
+host even if leaked. **Fail-closed:** an empty `webui_source_ips` refuses the
+act-as credential entirely (403) — the setting is a deploy requirement, not
+an optional hardening. A global mutation rate cap applies across all act-as
 traffic on top of per-member limits.
 
 ## Endpoints

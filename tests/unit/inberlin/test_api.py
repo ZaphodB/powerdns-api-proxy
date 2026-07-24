@@ -561,6 +561,27 @@ def test_webui_token_bound_to_source_ip(client):
         rt.settings.webui_source_ips = saved
 
 
+def test_webui_token_fails_closed_without_configured_source_ips(client):
+    # hy3 round 11a: an empty list must not silently disable the binding —
+    # the act-as token is impersonation-root, so an unset/typo'd
+    # webui_source_ips has to refuse the credential, not widen it
+    import powerdns_api_proxy.inberlin.runtime as runtime_mod
+
+    rt = runtime_mod.get_runtime()
+    saved = rt.settings.webui_source_ips
+    rt.settings.webui_source_ips = []
+    try:
+        assert client.get(ZONES_PATH, headers=act_as("alice")).status_code == 403
+        assert (
+            client.get(
+                "/proxy/v1/whoami", headers={"X-API-Key": WEBUI_TOKEN}
+            ).status_code
+            == 403
+        )
+    finally:
+        rt.settings.webui_source_ips = saved
+
+
 # -- fail-closed journal ----------------------------------------------------------
 
 

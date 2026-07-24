@@ -69,6 +69,9 @@ def make_settings(tmp_path) -> InBerlinSettings:
     return InBerlinSettings(
         state_db=str(tmp_path / "state.sqlite"),
         deny_zones=["in-berlin.de", "secret.kunde.example"],
+        # act-as is fail-closed without this (TestClient connects as "testclient"),
+        # same requirement production has: bind the token to the UI host
+        webui_source_ips=["testclient"],
         environment_roles={
             "webui": ["webui"],
             "exporter": ["exporter"],

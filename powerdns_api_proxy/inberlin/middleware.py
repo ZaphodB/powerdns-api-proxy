@@ -151,9 +151,12 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                     # must never fall through to the plain static environment,
                     # and its source-IP binding applies to every use — a stolen
                     # token from a foreign host gets nothing, headers or not.
+                    # Fail closed on an empty list: this token is
+                    # impersonation-root, so an unset or typo'd
+                    # webui_source_ips must refuse it, never widen it.
                     allowed = runtime.settings.webui_source_ips
                     client_ip = request.client.host if request.client else None
-                    if allowed and client_ip not in allowed:
+                    if not allowed or client_ip not in allowed:
                         logger.warning(
                             f"webui act-as token used from unauthorized source {client_ip}"
                         )
