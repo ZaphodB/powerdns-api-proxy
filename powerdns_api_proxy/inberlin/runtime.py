@@ -2,7 +2,6 @@
 lifespan. None when the `inberlin:` config block is absent (extension off)."""
 
 import asyncio
-import sqlite3
 import weakref
 
 from prometheus_client import REGISTRY
@@ -34,6 +33,10 @@ class Runtime:
             OIDCValidator(settings.oidc) if settings.oidc else None
         )
         self._prune_task: asyncio.Task | None = None
+        self._db_size_task: asyncio.Task | None = None
+        # Cached for the /metrics collector, which is called synchronously by
+        # prometheus_client and must not touch SQLite on the event loop.
+        self.journal_db_bytes: int | None = None
         # WeakValueDictionary: a lock lives only while some task holds a
         # strong reference (i.e. is inside the `async with`). Zone names come
         # from authenticated-but-arbitrary request paths — a plain dict would
@@ -63,10 +66,16 @@ class Runtime:
             f"{len(self.mapping.view.zones_by_user)} user"
         )
         self._prune_task = asyncio.create_task(self._prune_loop())
+        # Seed before the refresh loop so the gauge exists from the first
+        # scrape (the loop only wakes every 60s).
+        self.journal_db_bytes = await self.store.db_size_bytes()
+        self._db_size_task = asyncio.create_task(self._db_size_loop())
 
     async def stop(self) -> None:
         if self._prune_task:
             self._prune_task.cancel()
+        if self._db_size_task:
+            self._db_size_task.cancel()
         self.store.close()
 
     async def _prune_loop(self) -> None:
@@ -81,6 +90,17 @@ class Runtime:
             except Exception:
                 logger.exception("journal prune failed")
             await asyncio.sleep(24 * 3600)
+
+    async def _db_size_loop(self) -> None:
+        """Refresh the journal DB size cache for the /metrics gauge (store
+        threadpool read; scrape-time freshness is not worth sync sqlite on
+        the event loop)."""
+        while True:
+            try:
+                self.journal_db_bytes = await self.store.db_size_bytes()
+            except Exception:
+                logger.exception("journal db size refresh failed")
+            await asyncio.sleep(60)
 
     def env_roles(self, env_name: str) -> tuple[str, ...]:
         """Roles configured for a static environment name (empty if none)."""
@@ -116,26 +136,19 @@ async def shutdown_runtime() -> None:
 
 class _JournalDbSizeCollector:
     """Journal SQLite size gauge on the upstream /metrics endpoint
-    (docs/api-contract.md lines 57-58). Resolves the runtime at scrape time:
-    absent runtime or unreadable DB yields nothing (absent beats wrong)."""
+    (docs/api-contract.md lines 57-58). Reads the cache maintained by
+    Runtime._db_size_loop — collect() runs synchronously in the scrape path
+    and must not touch SQLite on the event loop. Absent runtime or not yet
+    refreshed yields nothing (absent beats wrong)."""
 
     def collect(self):
         rt = get_runtime()
-        if rt is None:
-            return
-        try:
-            conn = sqlite3.connect(rt.settings.state_db)
-            try:
-                pages = conn.execute("PRAGMA page_count").fetchone()[0]
-                page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-            finally:
-                conn.close()
-        except sqlite3.Error:
+        if rt is None or rt.journal_db_bytes is None:
             return
         yield GaugeMetricFamily(
             "inberlin_journal_db_bytes",
             "IN-Berlin journal SQLite database size in bytes",
-            value=pages * page_size,
+            value=rt.journal_db_bytes,
         )
 
 

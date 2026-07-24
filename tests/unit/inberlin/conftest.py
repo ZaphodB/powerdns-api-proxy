@@ -251,6 +251,9 @@ def client(tmp_path, fake_pdns) -> Generator[TestClient, None, None]:
             0, {"alice": ["kunde.example"], "bob": ["bob.example"]}, "test-seed"
         )
     )
+    # start() seeds this in production; the fixture skips start() (no prune /
+    # refresh tasks wanted under TestClient)
+    rt.journal_db_bytes = asyncio.run(rt.store.db_size_bytes())
     runtime_mod._runtime = rt
     from powerdns_api_proxy.proxy import app
 
