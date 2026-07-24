@@ -241,6 +241,22 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 )
                 environment = environment_for_user(user, runtime.mapping.view)
 
+        # Request-time §5 ownership gate for zone-addressed /api/v1 requests
+        # (terra-pro round 9 HIGH): the synthesized env grants owned zones
+        # with subzones=True, which upstream matching extends to ALL
+        # descendants — it cannot express carve-outs. owner_of() re-resolves
+        # the addressed zone (deny set → most-specific override → longest
+        # owned suffix), so an override carve-out or deny-set descendant
+        # under an owned parent stays unreachable. Zone list responses may
+        # still show carved-out descendant names — accepted: delegation
+        # names are public in DNS anyway.
+        if identity.effective_user is not None and path.startswith("/api/v1"):
+            zone_ref = await _addressed_zone(request, path)
+            if zone_ref is not None and (
+                runtime.mapping.view.owner_of(zone_ref) != identity.effective_user
+            ):
+                return _error(403, "zone not owned")
+
         token_id = identity.actor
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             mut_key = identity.effective_user or token_id
@@ -278,6 +294,28 @@ class IdentityMiddleware(BaseHTTPMiddleware):
 def _static_env_for_token(config, token: str):
     """Static environment whose sha512 matches the presented token, or None."""
     return config.token_env_map.get(sha512(token))
+
+
+async def _addressed_zone(request: Request, path: str) -> str | None:
+    """Zone a /api/v1 request addresses: path segment after /zones/, or the
+    body `name` on a zone-collection POST. None when no single zone is
+    addressed (zone list, servers, search). Unparseable values pass through
+    as-is — owner_of() canonicalization resolves them to no owner, which
+    fails closed."""
+    parts = path.strip("/").split("/")
+    if "zones" not in parts:
+        return None
+    zi = parts.index("zones")
+    if len(parts) > zi + 1:
+        return parts[zi + 1]
+    if request.method == "POST":
+        try:
+            body = json.loads(await request.body())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if isinstance(body, dict) and isinstance(body.get("name"), str):
+            return body["name"]
+    return None
 
 
 class JournalMiddleware(BaseHTTPMiddleware):

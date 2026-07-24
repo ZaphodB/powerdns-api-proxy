@@ -68,7 +68,7 @@ def make_config() -> ProxyConfig:
 def make_settings(tmp_path) -> InBerlinSettings:
     return InBerlinSettings(
         state_db=str(tmp_path / "state.sqlite"),
-        deny_zones=["in-berlin.de"],
+        deny_zones=["in-berlin.de", "secret.kunde.example"],
         environment_roles={
             "webui": ["webui"],
             "exporter": ["exporter"],

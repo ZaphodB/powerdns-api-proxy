@@ -72,10 +72,12 @@ class Runtime:
         self._db_size_task = asyncio.create_task(self._db_size_loop())
 
     async def stop(self) -> None:
-        if self._prune_task:
-            self._prune_task.cancel()
-        if self._db_size_task:
-            self._db_size_task.cancel()
+        # Await cancellation before closing the store: cancel() alone leaves
+        # a to_thread DB read racing store.close() (terra-pro round 9).
+        tasks = [t for t in (self._prune_task, self._db_size_task) if t]
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self.store.close()
 
     async def _prune_loop(self) -> None:

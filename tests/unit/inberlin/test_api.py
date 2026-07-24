@@ -673,6 +673,75 @@ def test_ready_admin_only_and_reports(client):
 # -- kimi round regressions ---------------------------------------------------
 
 
+def test_parent_owner_cannot_reach_carved_out_descendants(client, fake_pdns):
+    # terra-pro round 9 HIGH: the synthesized parent grant (subzones=True)
+    # must not bypass owner_of() resolution for descendants — an override
+    # carve-out or deny-set descendant belongs to someone else / nobody, and
+    # the parent owner's env may not touch it (docs/authz-flow.md §5).
+    admin = {"X-API-Key": ADMIN_TOKEN}
+    fake_pdns.zones["sub.kunde.example."] = {
+        "id": "sub.kunde.example.",
+        "name": "sub.kunde.example.",
+        "kind": "Native",
+        "rrsets": [],
+    }
+    r = client.post(
+        "/proxy/v1/overrides",
+        headers={**admin, "If-Match": "1"},
+        json={"zone": "sub.kunde.example.", "user": "bob"},
+    )
+    assert r.status_code == 201
+
+    # alice owns kunde.example. but sub.kunde.example. is bob's now
+    for attempt in (
+        lambda: client.get(f"{ZONES_PATH}/sub.kunde.example.", headers=act_as("alice")),
+        lambda: client.patch(
+            f"{ZONES_PATH}/sub.kunde.example.",
+            headers=act_as("alice"),
+            json=PATCH_BODY,
+        ),
+        lambda: client.delete(
+            f"{ZONES_PATH}/sub.kunde.example.", headers=act_as("alice")
+        ),
+        lambda: client.get(
+            f"{ZONES_PATH}/sub.kunde.example./cryptokeys", headers=act_as("alice")
+        ),
+        lambda: client.post(
+            ZONES_PATH,
+            headers=act_as("alice"),
+            json={"name": "deep.sub.kunde.example.", "kind": "Native", "rrsets": []},
+        ),
+    ):
+        assert attempt().status_code == 403
+
+    # the carve-out owner keeps full control
+    assert (
+        client.patch(
+            f"{ZONES_PATH}/sub.kunde.example.",
+            headers=act_as("bob"),
+            json=PATCH_BODY,
+        ).status_code
+        == 204
+    )
+
+    # deny-set descendant of an owned zone resolves to nobody — parent owner
+    # gets 403, not access via the parent grant
+    assert (
+        client.get(
+            f"{ZONES_PATH}/secret.kunde.example.", headers=act_as("alice")
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            ZONES_PATH,
+            headers=act_as("alice"),
+            json={"name": "x.secret.kunde.example.", "kind": "Native", "rrsets": []},
+        ).status_code
+        == 403
+    )
+
+
 def test_create_override_duplicate_409(client):
     admin = {"X-API-Key": ADMIN_TOKEN}
     body = {"zone": "sub.kunde.example.", "user": "bob"}
