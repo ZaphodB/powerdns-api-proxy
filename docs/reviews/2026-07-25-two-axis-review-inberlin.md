@@ -115,3 +115,60 @@ Webui/exporter clients must match the corrected contract before rollout:
   owners keep full zone control (see spec finding 2)
 - GET `/proxy/v1/keys` list uses `prefix`
 - webui token without `X-Teilnehmer` and duplicate credential headers → 400
+- `webui_source_ips` is now a hard deploy requirement: empty ⇒ the act-as
+  credential is refused outright (403)
+
+## Post-refactor adversarial rounds 9-11
+
+Rounds 1-8 hardened code shapes that round 8 then rewrote (router, journal
+execution path), so three more rounds ran against the refactored diff.
+
+**Round 9 — terra-pro, 2 findings, both real.**
+
+1. HIGH — the synthesized member environment grants each owned zone with
+   `subzones=True`, which upstream matching extends to *every* label-boundary
+   descendant. That grant model cannot express carve-outs, so an override
+   delegating `sub.kunde.example.` to another member, a deny-set descendant,
+   or a deeper explicit mapping entry were all still reachable by the parent
+   owner — and, after the owner-full-control change, reachable for zone
+   delete and DNSSEC too. → `IdentityMiddleware` now re-resolves the addressed
+   zone through `MappingView.owner_of()` (deny set → most-specific override →
+   longest owned suffix) for every zone-addressed `/api/v1` request and 403s on
+   mismatch. Accepted: zone *list* responses may still show carved-out
+   descendant names (delegation names are public in DNS).
+2. MEDIUM — `stop()` cancelled background tasks without awaiting them, racing
+   an in-flight threadpool read against `store.close()`. → gather before close.
+
+**Round 10 — gemini-pro, 1 finding, real.** HIGH: under anyio's level-based
+cancellation every `await` inside a cancelled scope re-raises, so the inline
+`mark_uncertain()` / `finalize()` writes in `run_journaled` never reached the
+DB on client disconnect — the intent row stayed `pending` forever, breaking
+the "no pending row silently lost" invariant. → settle writes now run as
+detached tasks outside the cancelled scope; `journal_finalize`'s
+`WHERE id = ? AND status IN ('pending','uncertain')` guard makes the race
+downgrade-safe.
+
+**Round 11 — hy3 (two passes: auth surface, journal core).** 4 real of 11
+reported.
+
+- MEDIUM (auth) — an empty `webui_source_ips` silently disabled the source-IP
+  binding on an impersonation-root token. → fail closed.
+- HIGH (journal) — a disconnect during the intent insert: the threadpool write
+  lands but its row id was lost with the cancelled request. → insert shielded,
+  settled by a detached waiter.
+- MEDIUM (journal) — a `finalize()` DB error that was not a cancellation
+  propagated without settling. → settle on any exception.
+- MEDIUM (journal) — `status_of()` raising after a successful forward left the
+  row pending although the mutation had reached pdns. → moved inside the
+  guarded block.
+- Also self-caught while fixing: detached settle tasks could outlive
+  `store.close()`. → `drain_settles()` (bounded 5s) before close.
+
+Refuted with evidence, not argument: hy3's two path-normalization bypasses
+(`//api/v1/…`, `/API/V1/…`, `%2f`, `..` segments — every variant returns 404
+from routing or 403 from the gate, verified by test), cross-row clobber from a
+late settle (`journal_finalize` keys on `id`), `WeakValueDictionary` lock
+re-minting (the caller's local variable is a strong ref for the lock's whole
+lifetime), and `mark_uncertain` failing silently (it logs via
+`logger.exception`). `X-Webui-User` being attacker-settable behind the shared
+token is a pre-existing documented residual risk, not a new finding.
