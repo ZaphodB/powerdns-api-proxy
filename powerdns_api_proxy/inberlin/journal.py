@@ -298,6 +298,16 @@ def _settle_in_background(coro: Awaitable[None], label: str) -> None:
     task.add_done_callback(_done)
 
 
+async def _settle_after(intent_task: asyncio.Task, capture: "JournalCapture") -> None:
+    """Wait out an in-flight intent write, then mark its row uncertain. Runs
+    detached, so it survives the cancellation that triggered it."""
+    try:
+        await intent_task
+    except Exception:
+        return  # intent failed -> no row to settle
+    await capture.mark_uncertain()
+
+
 async def drain_settles(timeout: float = 5.0) -> None:
     """Wait for in-flight settle writes at shutdown, so no row is left pending
     by a store closed out from under a detached task."""
@@ -338,30 +348,43 @@ async def run_journaled(
     async with lock:
         if before_intent is not None:
             await before_intent()
+        # Own task: the INSERT runs in a threadpool and cannot be cancelled, so
+        # a disconnect mid-intent would otherwise write the row and lose the
+        # id with it (hy3 round 11b). The task completes either way; if we were
+        # cancelled, settle it once the id exists.
+        intent_task = asyncio.ensure_future(capture.intent(rollback_of=rollback_of))
         try:
-            await capture.intent(rollback_of=rollback_of)
+            # shield: a cancel of this request must not abort the in-flight
+            # insert, or the row lands with its id lost to us.
+            await asyncio.shield(intent_task)
         except Exception:
             logger.exception("journal intent failed (fail-closed)")
             return None
+        except BaseException:
+            _settle_in_background(_settle_after(intent_task, capture), "intent")
+            raise
         try:
             resp = await forward()
+            status = status_of(resp)
         except BaseException:
             # The mutation may already have reached pdns; never leave the row
             # pending. A client disconnect cancels this task, and under
             # anyio's level-based cancellation an inline await here would be
             # re-cancelled before the DB write lands (gemini round 10) — so
             # settle the row outside the cancelled scope, then re-raise.
+            # status_of() is inside the try for the same reason: it runs after
+            # the mutation landed.
             _settle_in_background(capture.mark_uncertain(), "mark_uncertain")
             raise
-        fin = asyncio.ensure_future(capture.finalize(status_of(resp)))
+        fin = asyncio.ensure_future(capture.finalize(status))
         try:
             await fin
-        except asyncio.CancelledError:
-            # Client walked away mid-finalize. Stop the (separate) finalize
-            # task and settle the row out-of-scope; journal_finalize only
-            # transitions pending/uncertain rows, so whichever write lands
-            # last cannot downgrade a committed row.
+        except BaseException:
+            # Client walked away or the finalize write itself failed. Stop the
+            # (separate) finalize task and settle the row out-of-scope;
+            # journal_finalize only transitions pending/uncertain rows by id,
+            # so whichever write lands last cannot downgrade a committed row.
             fin.cancel()
-            _settle_in_background(capture.mark_uncertain(), "finalize-cancelled")
+            _settle_in_background(capture.mark_uncertain(), "finalize-failed")
             raise
     return resp
