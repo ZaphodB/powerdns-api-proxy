@@ -49,11 +49,7 @@ async def _cancel_until_done(task: asyncio.Task) -> None:
 
 
 async def _drain_background():
-    for t in list(journal._background_tasks):
-        try:
-            await t
-        except (Exception, asyncio.CancelledError):
-            pass
+    await journal.drain_settles()
 
 
 def test_cancel_during_forward_settles_uncertain():

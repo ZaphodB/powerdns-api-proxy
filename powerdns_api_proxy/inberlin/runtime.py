@@ -78,6 +78,12 @@ class Runtime:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Detached journal settles must COMPLETE, not be cancelled — each one
+        # is the write that keeps a row from staying pending. Bounded so a
+        # wedged store cannot block shutdown forever.
+        from powerdns_api_proxy.inberlin.journal import drain_settles
+
+        await drain_settles()
         self.store.close()
 
     async def _prune_loop(self) -> None:

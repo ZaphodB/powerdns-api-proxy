@@ -298,6 +298,20 @@ def _settle_in_background(coro: Awaitable[None], label: str) -> None:
     task.add_done_callback(_done)
 
 
+async def drain_settles(timeout: float = 5.0) -> None:
+    """Wait for in-flight settle writes at shutdown, so no row is left pending
+    by a store closed out from under a detached task."""
+    pending = list(_background_tasks)
+    if not pending:
+        return
+    done, still_running = await asyncio.wait(pending, timeout=timeout)
+    if still_running:
+        logger.error(
+            f"{len(still_running)} journal settle task(s) unfinished at shutdown; "
+            "their rows stay pending for reconciliation"
+        )
+
+
 async def run_journaled(
     capture: JournalCapture,
     lock: asyncio.Lock,
