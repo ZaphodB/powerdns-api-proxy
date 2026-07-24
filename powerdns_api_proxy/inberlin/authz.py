@@ -2,12 +2,12 @@
 
 For an identity with an effective User, builds an upstream
 ProxyConfigEnvironment on the fly from the live mapping view: every owned zone
-becomes a zone entry with subzones=True and full record access; override
-grants included; deny-set zones excluded by owner resolution. The spec grants
-NOTHING beyond that (docs/authz-flow.md §4): no zone `admin` (zone
-create/delete is the registrar's and admin's job) and no `cryptokeys` (DNSSEC
-key management is admin-only). Admin OIDC identities get a wildcard admin
-environment.
+becomes a zone entry with admin=True, subzones=True, cryptokeys=True and full
+record access; override grants included; deny-set zones excluded by owner
+resolution. Owning a zone means full control over it and its descendants —
+records, subzone create, zone delete, DNSSEC keys (owner decision 2026-07-25,
+docs/authz-flow.md §4); only unrelated apexes are denied. Admin OIDC
+identities get a wildcard admin environment.
 
 The synthesized environment is placed in the current_environment contextvar;
 the patched upstream get_environment_for_token() prefers it over the static
@@ -34,7 +34,9 @@ def environment_for_user(user: str, view: MappingView) -> ProxyConfigEnvironment
         zones.append(
             ProxyConfigZone(
                 name=zone,
+                admin=True,
                 subzones=True,
+                cryptokeys=True,
             )
         )
     return ProxyConfigEnvironment(

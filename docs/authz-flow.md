@@ -43,7 +43,10 @@ request
   │    - canonicalization of TN ids: lowercase, NFC
   │ 4. environment synthesis (authz.py) — only for TN-scoped identities
   │    - zones = mapping[effective_tn] + override grants for effective_tn
-  │    - implicit subzones: each owned zone gets subzones=True
+  │    - each owned zone gets admin=True, subzones=True, cryptokeys=True:
+  │      owning a zone = full control over it and its descendants (records,
+  │      subzone create, zone delete, DNSSEC keys) — no gatekeeping
+  │      (owner decision 2026-07-25; supersedes the earlier subzones-only grant)
   │    - deny set: configured infra zones removed unconditionally
   │    - admins/static envs keep their YAML-defined environment
   │    - result: ephemeral ProxyConfigEnvironment in a request contextvar;

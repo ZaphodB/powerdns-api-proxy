@@ -32,6 +32,10 @@ Resolution commits:
    → grants stripped. **Behavior change:** member zone create/delete and
    DNSSEC key management via `/api/v1` are now 403; the zone-delete rollback
    flow is admin-driven.
+   **REVERSED 2026-07-25 (owner decision):** the code was right and the spec
+   was wrong — owning a zone means full control over it and its descendants
+   (records, subzone create, zone delete, DNSSEC keys), no gatekeeping.
+   Grants restored, authz-flow.md §4 updated to match.
 3. **GET /proxy/v1/mapping response shape diverged** (contract line 38:
    `{generation, applied_at, mapping}`; code returned `{generation, mapping,
    overrides}`, never surfacing the persisted `applied_at`).
@@ -107,6 +111,7 @@ Webui/exporter clients must match the corrected contract before rollout:
 
 - overrides POST/DELETE require `If-Match` (400/409)
 - GET `/proxy/v1/mapping` shape is `{generation, applied_at, mapping}`
-- member zone create/delete and cryptokeys are 403 (registrar + admin only)
+- ~~member zone create/delete and cryptokeys are 403~~ reversed same day —
+  owners keep full zone control (see spec finding 2)
 - GET `/proxy/v1/keys` list uses `prefix`
 - webui token without `X-Teilnehmer` and duplicate credential headers → 400

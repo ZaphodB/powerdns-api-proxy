@@ -282,8 +282,6 @@ def test_journal_scoping_no_idor(client):
 
 
 def test_zone_delete_rollback_recreates(client, fake_pdns):
-    # zone create/delete needs the zone `admin` flag, which the spec grants
-    # only to admins — TN envs carry subzones=True only (authz-flow.md §4)
     admin = {"X-API-Key": ADMIN_TOKEN}
     r = client.delete(f"{ZONES_PATH}/kunde.example.", headers=admin)
     assert r.status_code == 204
@@ -303,14 +301,37 @@ def test_zone_delete_rollback_recreates(client, fake_pdns):
     assert fake_pdns.zones["kunde.example."]["rrsets"]
 
 
-def test_member_zone_admin_and_cryptokeys_forbidden(client):
-    # spec never grants members zone admin or DNSSEC key management
+def test_member_owns_zone_fully(client, fake_pdns):
+    # Owner decision 2026-07-25: owning a zone means full control over it and
+    # its descendants — record ops, subzone create, delete, DNSSEC keys. No
+    # gatekeeping. Only unrelated apexes stay off-limits.
+    assert (
+        client.patch(
+            f"{ZONES_PATH}/kunde.example.", headers=act_as("alice"), json=PATCH_BODY
+        ).status_code
+        == 204
+    )
+    assert (
+        client.post(
+            ZONES_PATH,
+            headers=act_as("alice"),
+            json={"name": "sub.kunde.example.", "kind": "Native", "rrsets": []},
+        ).status_code
+        == 201
+    )
+    assert (
+        client.get(
+            f"{ZONES_PATH}/kunde.example./cryptokeys", headers=act_as("alice")
+        ).status_code
+        == 200
+    )
     assert (
         client.delete(
             f"{ZONES_PATH}/kunde.example.", headers=act_as("alice")
         ).status_code
-        == 403
+        == 204
     )
+    # zones alice does not own remain denied
     assert (
         client.post(
             ZONES_PATH,
@@ -318,19 +339,6 @@ def test_member_zone_admin_and_cryptokeys_forbidden(client):
             json={"name": "raw.example.", "kind": "Native", "rrsets": []},
         ).status_code
         == 403
-    )
-    assert (
-        client.get(
-            f"{ZONES_PATH}/kunde.example./cryptokeys", headers=act_as("alice")
-        ).status_code
-        == 403
-    )
-    # record ops on own zones stay allowed (no admin flag needed)
-    assert (
-        client.patch(
-            f"{ZONES_PATH}/kunde.example.", headers=act_as("alice"), json=PATCH_BODY
-        ).status_code
-        == 204
     )
 
 
