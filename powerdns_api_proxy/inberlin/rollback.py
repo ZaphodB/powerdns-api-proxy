@@ -19,14 +19,6 @@ from powerdns_api_proxy.inberlin.names import canonical_zone
 from powerdns_api_proxy.pdns import PDNSConnector
 
 
-class RollbackDrift(Exception):
-    """Live upstream state no longer matches the entry's recorded after-state."""
-
-    def __init__(self, details: list[str]):
-        self.details = details
-        super().__init__("; ".join(details))
-
-
 class NotRollbackable(Exception):
     """Entry has no inverse (crypto/tsig/meta ops, or missing recorded state)."""
 

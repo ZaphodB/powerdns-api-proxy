@@ -317,7 +317,6 @@ class JournalMiddleware(BaseHTTPMiddleware):
             runtime.zone_lock(capture.zone_name()),
             lambda: call_next(request),
             status_of=lambda r: r.status_code,
-            rollback_of=getattr(request.state, "rollback_of", None),
         )
         if response is None:
             return _error(503, "journal unavailable, mutation refused")

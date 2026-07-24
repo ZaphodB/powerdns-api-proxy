@@ -361,14 +361,6 @@ class Store:
 
         return await self._write(run)
 
-    async def count_active_keys(self, user: str) -> int:
-        return await self._read(
-            lambda c: c.execute(
-                "SELECT COUNT(*) AS n FROM api_key WHERE user = ? AND revoked_at IS NULL",
-                (user,),
-            ).fetchone()["n"]
-        )
-
     async def find_key_by_prefix(self, prefix: str) -> list[dict]:
         return await self._read(
             lambda c: [
