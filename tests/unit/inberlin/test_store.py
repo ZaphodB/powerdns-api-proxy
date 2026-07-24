@@ -3,9 +3,16 @@ import sqlite3
 
 import pytest
 
+from powerdns_api_proxy.inberlin.identity import Identity
 from powerdns_api_proxy.inberlin.keys import generate_key, parse_prefix, verify_key
 from powerdns_api_proxy.inberlin.mapping import MappingState
 from powerdns_api_proxy.inberlin.store import GenerationMismatch, Store
+
+
+def _session_identity(user="alice"):
+    return Identity(
+        kind="webui-act-as", actor="webui", effective_user=user, webui_user=user
+    )
 
 
 def run(coro):
@@ -77,6 +84,7 @@ def test_key_revoke_scoping(store):
 
 def test_key_cap_enforced_in_transaction(store):
     import pytest
+
     from powerdns_api_proxy.inberlin.store import KeyLimitReached
 
     for _ in range(2):
@@ -94,11 +102,7 @@ def test_key_cap_enforced_in_transaction(store):
 def test_journal_state_machine(store):
     jid = run(
         store.journal_intent(
-            user="alice",
-            actor="webui",
-            actor_kind="webui-act-as",
-            impersonator=None,
-            webui_user="alice",
+            _session_identity(),
             zone="kunde.example.",
             method="PATCH",
             path="/api/v1/servers/localhost/zones/kunde.example.",
@@ -135,11 +139,7 @@ def test_journal_state_machine(store):
 def test_journal_resolve_uncertain(store):
     jid = run(
         store.journal_intent(
-            user=None,
-            actor="x",
-            actor_kind="static",
-            impersonator=None,
-            webui_user=None,
+            Identity(kind="static", actor="x"),
             zone=".",
             method="POST",
             path="/p",
@@ -164,11 +164,7 @@ def test_journal_resolve_uncertain(store):
 def _intent(store, status=None):
     jid = run(
         store.journal_intent(
-            user=None,
-            actor="x",
-            actor_kind="static",
-            impersonator=None,
-            webui_user=None,
+            Identity(kind="static", actor="x"),
             zone=".",
             method="POST",
             path="/p",
@@ -207,11 +203,7 @@ def test_journal_prune_survives_rollback_fk(store):
     parent = _intent(store, "committed")
     child = run(
         store.journal_intent(
-            user=None,
-            actor="x",
-            actor_kind="static",
-            impersonator=None,
-            webui_user=None,
+            Identity(kind="static", actor="x"),
             zone=".",
             method="POST",
             path="/p",

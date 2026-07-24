@@ -9,7 +9,6 @@ requests with the write-ahead journal.
 import json
 import time
 from collections import defaultdict, deque
-from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -25,10 +24,11 @@ from powerdns_api_proxy.inberlin.identity import (
     current_environment,
     current_identity,
 )
-from powerdns_api_proxy.inberlin.journal import JournalCapture, classify
-from powerdns_api_proxy.inberlin.keys import verify_key
-from powerdns_api_proxy.inberlin.names import canonical_tn
+from powerdns_api_proxy.inberlin.journal import JournalCapture, classify, run_journaled
+from powerdns_api_proxy.inberlin.keys import sha512, verify_key
+from powerdns_api_proxy.inberlin.names import canonical_user
 from powerdns_api_proxy.inberlin.runtime import get_runtime
+from powerdns_api_proxy.inberlin.roles import ADMIN, WEBUI
 from powerdns_api_proxy.logging import logger
 
 IDENTITY_HEADERS = (
@@ -48,7 +48,7 @@ def _error(status: int, detail: str) -> JSONResponse:
 
 class RateLimiter:
     """Sliding-window (60s) in-memory limiter. Buckets: auth failures per
-    client IP, mutations per effective TN/token, and one global webui bucket
+    client IP, mutations per effective User/token, and one global webui bucket
     capping all act-as mutations combined."""
 
     def __init__(
@@ -138,7 +138,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
         )
         request.app.state.inberlin_limiter = limiter
 
-        identity: Optional[Identity] = None
+        identity: Identity | None = None
         environment = None
 
         config = load_config()
@@ -146,7 +146,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             static_env = _static_env_for_token(config, api_key)
             if static_env is not None:
                 roles = runtime.env_roles(static_env.name)
-                if "webui" in roles:
+                if WEBUI in roles:
                     # The shared UI token is act-as ONLY: without X-Teilnehmer it
                     # must never fall through to the plain static environment,
                     # and its source-IP binding applies to every use — a stolen
@@ -160,15 +160,15 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                         return _error(403, "webui token not valid from this source")
                     if not x_tn:
                         return _error(400, "webui act-as requires X-Teilnehmer")
-                    tn_value = canonical_tn(x_tn)
+                    user_value = canonical_user(x_tn)
                     identity = Identity(
                         kind="webui-act-as",
                         actor=static_env.name,
-                        effective_teilnehmer=tn_value,
+                        effective_user=user_value,
                         webui_user=x_webui_user,
                         roles=roles,
                     )
-                    environment = environment_for_user(tn_value, runtime.mapping.view)
+                    environment = environment_for_user(user_value, runtime.mapping.view)
                 elif x_tn or x_imp:
                     return _error(
                         403, "identity headers not allowed for this credential"
@@ -177,13 +177,13 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                     identity = Identity(
                         kind="static",
                         actor=static_env.name,
-                        is_admin="admin" in roles,
+                        is_admin=ADMIN in roles,
                         roles=roles,
                     )
                     environment = static_env
             else:
-                tn = await verify_key(runtime.store, api_key)
-                if tn is None:
+                user = await verify_key(runtime.store, api_key)
+                if user is None:
                     if limiter.hit(
                         "auth", request.client.host if request.client else "?"
                     ):
@@ -191,8 +191,8 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                     return _error(401, "Unauthorized")
                 if x_tn or x_imp:
                     return _error(403, "identity headers not allowed for API keys")
-                identity = Identity(kind="tn-key", actor=tn, effective_teilnehmer=tn)
-                environment = environment_for_user(tn, runtime.mapping.view)
+                identity = Identity(kind="tn-key", actor=user, effective_user=user)
+                environment = environment_for_user(user, runtime.mapping.view)
         else:
             if runtime.oidc is None or runtime.settings.oidc is None:
                 return _error(401, "OIDC not configured")
@@ -213,16 +213,16 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             if x_imp:
                 if not is_admin:
                     return _error(403, "impersonation requires admin group")
-                tn_value = canonical_tn(x_imp)
+                user_value = canonical_user(x_imp)
                 identity = Identity(
                     kind="oidc",
                     actor=sub,
                     display=username,
-                    effective_teilnehmer=tn_value,
+                    effective_user=user_value,
                     impersonator=sub,
                     is_admin=True,
                 )
-                environment = environment_for_user(tn_value, runtime.mapping.view)
+                environment = environment_for_user(user_value, runtime.mapping.view)
             elif is_admin:
                 identity = Identity(
                     kind="oidc", actor=sub, display=username, is_admin=True
@@ -233,17 +233,17 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 # `sub` through the user_identity bridge — never trust the
                 # mutable username claim as an authorization identity. Until a
                 # member is explicitly bridged, User OIDC is not enabled.
-                tn = await runtime.store.user_for_sub(sub)
-                if tn is None:
+                user = await runtime.store.user_for_sub(sub)
+                if user is None:
                     return _error(403, "User SSO not enabled for this account")
                 identity = Identity(
-                    kind="oidc", actor=sub, display=username, effective_teilnehmer=tn
+                    kind="oidc", actor=sub, display=username, effective_user=user
                 )
-                environment = environment_for_user(tn, runtime.mapping.view)
+                environment = environment_for_user(user, runtime.mapping.view)
 
         token_id = identity.actor
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-            mut_key = identity.effective_teilnehmer or token_id
+            mut_key = identity.effective_user or token_id
             if limiter.hit("mutation", mut_key):
                 return _error(429, "rate limited")
             if identity.kind == "webui-act-as" and limiter.hit("webui-global", "webui"):
@@ -277,10 +277,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
 
 def _static_env_for_token(config, token: str):
     """Static environment whose sha512 matches the presented token, or None."""
-    import hashlib
-
-    digest = hashlib.sha512(token.encode()).hexdigest()
-    return config.token_env_map.get(digest)
+    return config.token_env_map.get(sha512(token))
 
 
 class JournalMiddleware(BaseHTTPMiddleware):
@@ -315,26 +312,13 @@ class JournalMiddleware(BaseHTTPMiddleware):
         capture = JournalCapture(
             runtime, pdns, identity, request.method, request.url.path, info, body
         )
-        # Serialize intent → forward → finalize per zone: overlapping writes to
-        # the same zone would capture stale before/after states (see
-        # Runtime.zone_lock).
-        async with runtime.zone_lock(capture.zone_name()):
-            try:
-                await capture.intent(
-                    rollback_of=getattr(request.state, "rollback_of", None)
-                )
-            except Exception:
-                logger.exception(
-                    "journal intent failed — refusing mutation (fail-closed)"
-                )
-                return _error(503, "journal unavailable, mutation refused")
-
-            try:
-                response = await call_next(request)
-            except BaseException:
-                # The mutation may already have reached pdns; never leave the row
-                # pending. Mark it uncertain for admin reconciliation, then re-raise.
-                await capture.mark_uncertain()
-                raise
-            await capture.finalize(response.status_code)
-            return response
+        response = await run_journaled(
+            capture,
+            runtime.zone_lock(capture.zone_name()),
+            lambda: call_next(request),
+            status_of=lambda r: r.status_code,
+            rollback_of=getattr(request.state, "rollback_of", None),
+        )
+        if response is None:
+            return _error(503, "journal unavailable, mutation refused")
+        return response

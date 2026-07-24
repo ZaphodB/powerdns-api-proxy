@@ -38,7 +38,7 @@ def environment_for_user(user: str, view: MappingView) -> ProxyConfigEnvironment
             )
         )
     return ProxyConfigEnvironment(
-        name=f"tn:{user}",
+        name=f"user:{user}",
         token_sha512=_PLACEHOLDER_HASH,
         zones=zones,
     )

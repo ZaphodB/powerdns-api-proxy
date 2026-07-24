@@ -3,28 +3,31 @@ identity, health/ready, reload (docs/api-contract.md)."""
 
 import asyncio
 import dataclasses
-import json
 import sqlite3
-from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from powerdns_api_proxy.inberlin.identity import Identity, current_identity
-from powerdns_api_proxy.inberlin.journal import JournalCapture, classify, fetch_zone
+from powerdns_api_proxy.inberlin.journal import (
+    JournalCapture,
+    classify,
+    fetch_zone,
+    run_journaled,
+)
 from powerdns_api_proxy.inberlin.keys import generate_key
 from powerdns_api_proxy.inberlin.names import (
-    canonical_tn,
+    canonical_user,
     canonical_zone,
     zone_is_or_under,
 )
 from powerdns_api_proxy.inberlin.rollback import (
     NotRollbackable,
     build_rollback_request,
-    check_drift,
-    zone_state_drift,
+    check_entry_drift,
 )
+from powerdns_api_proxy.inberlin.roles import EXPORTER, METRICS, REGISTRAR
 from powerdns_api_proxy.inberlin.runtime import Runtime, get_runtime
 from powerdns_api_proxy.inberlin.store import GenerationMismatch, KeyLimitReached
 from powerdns_api_proxy.logging import logger
@@ -52,24 +55,24 @@ def _require_admin(identity: Identity) -> None:
 
 
 def _require_exporter_or_admin(identity: Identity) -> None:
-    if not (identity.is_admin or "exporter" in identity.roles):
+    if not (identity.is_admin or EXPORTER in identity.roles):
         raise HTTPException(403, "exporter or admin required")
 
 
-def _require_session_tn(identity: Identity) -> str:
+def _require_session_user(identity: Identity) -> str:
     """Journal/rollback access needs a session (act-as or OIDC), never a key."""
     if identity.kind == "tn-key":
         raise HTTPException(403, "not available for API keys, use a session")
-    return _require_tn(identity)
+    return _require_user(identity)
 
 
-def _require_tn(identity: Identity) -> str:
-    if not identity.effective_teilnehmer:
+def _require_user(identity: Identity) -> str:
+    if not identity.effective_user:
         raise HTTPException(403, "no effective User for this credential")
-    return identity.effective_teilnehmer
+    return identity.effective_user
 
 
-def _require_generation(if_match: Optional[str]) -> int:
+def _require_generation(if_match: str | None) -> int:
     """Parse the mandatory If-Match CAS generation header (400 if absent/bad)."""
     if if_match is None:
         raise HTTPException(400, "If-Match header with current generation required")
@@ -92,7 +95,7 @@ class MappingPatch(BaseModel):
 
 
 @router.put("/mapping")
-async def put_mapping(body: MappingPut, if_match: Optional[str] = Header(None)):
+async def put_mapping(body: MappingPut, if_match: str | None = Header(None)):
     rt, identity = _runtime(), _identity()
     _require_exporter_or_admin(identity)
     expected = _require_generation(if_match)
@@ -105,7 +108,7 @@ async def put_mapping(body: MappingPut, if_match: Optional[str] = Header(None)):
 
 
 @router.patch("/mapping")
-async def patch_mapping(body: MappingPatch, if_match: Optional[str] = Header(None)):
+async def patch_mapping(body: MappingPatch, if_match: str | None = Header(None)):
     rt, identity = _runtime(), _identity()
     _require_exporter_or_admin(identity)
     expected = _require_generation(if_match)
@@ -129,15 +132,15 @@ async def get_mapping():
     return {
         "generation": view.generation,
         "applied_at": view.applied_at,
-        "mapping": {tn: sorted(zones) for tn, zones in view.zones_by_tn.items()},
+        "mapping": {user: sorted(zones) for user, zones in view.zones_by_user.items()},
     }
 
 
 @router.get("/mapping/self")
 async def get_mapping_self():
     rt, identity = _runtime(), _identity()
-    tn = _require_tn(identity)
-    return {"user": tn, "zones": sorted(rt.mapping.view.zones_for(tn))}
+    user = _require_user(identity)
+    return {"user": user, "zones": sorted(rt.mapping.view.zones_for(user))}
 
 
 # -- overrides --------------------------------------------------------------
@@ -146,7 +149,7 @@ async def get_mapping_self():
 class OverrideCreate(BaseModel):
     zone: str
     user: str
-    note: Optional[str] = None
+    note: str | None = None
 
 
 @router.get("/overrides")
@@ -157,14 +160,14 @@ async def list_overrides():
 
 
 @router.post("/overrides", status_code=201)
-async def create_override(body: OverrideCreate, if_match: Optional[str] = Header(None)):
+async def create_override(body: OverrideCreate, if_match: str | None = Header(None)):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
     expected = _require_generation(if_match)
     zone = canonical_zone(body.zone)
     try:
         override_id, generation = await rt.mapping.add_override(
-            expected, zone, canonical_tn(body.user), identity.actor, body.note
+            expected, zone, canonical_user(body.user), identity.actor, body.note
         )
     except GenerationMismatch as e:
         raise HTTPException(409, f"generation mismatch, current is {e.current}")
@@ -174,7 +177,7 @@ async def create_override(body: OverrideCreate, if_match: Optional[str] = Header
 
 
 @router.delete("/overrides/{override_id}")
-async def delete_override(override_id: int, if_match: Optional[str] = Header(None)):
+async def delete_override(override_id: int, if_match: str | None = Header(None)):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
     expected = _require_generation(if_match)
@@ -219,22 +222,22 @@ def _journal_row_public(row: dict) -> dict:
 
 @router.get("/journal")
 async def query_journal(
-    zone: Optional[str] = None,
-    name: Optional[str] = None,
-    type: Optional[str] = None,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
-    user: Optional[str] = None,
+    zone: str | None = None,
+    name: str | None = None,
+    type: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    user: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
     rt, identity = _runtime(), _identity()
     if identity.is_admin:
-        tn_filter = canonical_tn(user) if user else None
+        tn_filter = canonical_user(user) if user else None
     else:
         if user is not None:
             raise HTTPException(403, "user filter is admin-only")
-        tn_filter = _require_session_tn(identity)
+        tn_filter = _require_session_user(identity)
     rows = await rt.store.journal_query(
         user=tn_filter,
         zone=canonical_zone(zone) if zone else None,
@@ -261,7 +264,7 @@ async def journal_uncertain():
     from powerdns_api_proxy.proxy import pdns
 
     server_id = rt.settings.upstream_server_id
-    upstream: dict[str, Optional[dict]] = {}
+    upstream: dict[str, dict | None] = {}
     for zone in {r["zone"] for r in rows} - {"."}:
         try:
             upstream[zone] = await fetch_zone(pdns, server_id, zone)
@@ -276,7 +279,7 @@ async def get_journal_entry(journal_id: int):
     entry = await rt.store.journal_get(journal_id)
     if entry is None:
         raise HTTPException(404, "journal entry not found")
-    if not identity.is_admin and entry["user"] != _require_session_tn(identity):
+    if not identity.is_admin and entry["user"] != _require_session_user(identity):
         raise HTTPException(404, "journal entry not found")  # no IDOR oracle
     return entry
 
@@ -311,7 +314,7 @@ async def rollback_journal_entry(
     entry = await rt.store.journal_get(journal_id)
     if entry is None:
         raise HTTPException(404, "journal entry not found")
-    if not identity.is_admin and entry["user"] != _require_session_tn(identity):
+    if not identity.is_admin and entry["user"] != _require_session_user(identity):
         raise HTTPException(404, "journal entry not found")
     if entry["status"] != "committed" or not entry["rollbackable"]:
         raise HTTPException(409, "entry is not rollbackable")
@@ -321,7 +324,7 @@ async def rollback_journal_entry(
     # current authz on the zone required (ownership may have changed)
     if not identity.is_admin:
         owner = rt.mapping.view.owner_of(entry["zone"])
-        if owner != identity.effective_teilnehmer:
+        if owner != identity.effective_user:
             raise HTTPException(403, "no current authorization on this zone")
 
     from powerdns_api_proxy.proxy import pdns
@@ -340,53 +343,27 @@ async def rollback_journal_entry(
     info = classify(method, path)
     assert info is not None
     capture = JournalCapture(rt, pdns, identity, method, path, info, payload)
-    # Per-zone serialization, same as JournalMiddleware. The drift check must
-    # sit INSIDE the lock: a concurrent write between check and apply would
-    # make the rollback silently clobber it.
-    async with rt.zone_lock(canonical_zone(entry["zone"])):
-        if not body.force:
-            # Every rollbackable operation gets a drift check, not just RRset
-            # patches: deleting a zone that changed since creation, or
-            # recreating one that already exists again, silently destroys
-            # someone else's later work.
-            try:
-                if entry["operation"] == "rrset-patch":
-                    drift = await check_drift(
-                        pdns, server_id, entry["zone"], entry["rrsets"]
-                    )
-                elif entry["operation"] == "zone-create":
-                    live = await fetch_zone(pdns, server_id, entry["zone"])
-                    after = (
-                        json.loads(entry["after_state"])
-                        if entry.get("after_state")
-                        else None
-                    )
-                    drift = zone_state_drift(live, after)
-                elif entry["operation"] == "zone-delete":
-                    live = await fetch_zone(pdns, server_id, entry["zone"])
-                    drift = (
-                        [] if live is None else ["zone was recreated since this entry"]
-                    )
-                else:
-                    drift = []
-            except RuntimeError:
-                raise HTTPException(502, "upstream unavailable, cannot verify drift")
-            if drift:
-                raise HTTPException(409, "state drifted: " + "; ".join(drift))
-        try:
-            await capture.intent(rollback_of=journal_id)
-        except Exception:
-            logger.exception("journal intent failed for rollback (fail-closed)")
-            raise HTTPException(503, "journal unavailable, rollback refused")
 
+    async def drift_check() -> None:
+        if body.force:
+            return
         try:
-            resp = await pdns.request(method, path, payload=payload or {})
-        except BaseException:
-            # Same contract as JournalMiddleware: the mutation may have reached
-            # pdns — never leave the intent row pending.
-            await capture.mark_uncertain()
-            raise
-        await capture.finalize(resp.status)
+            drift = await check_entry_drift(entry, pdns, server_id)
+        except RuntimeError:
+            raise HTTPException(502, "upstream unavailable, cannot verify drift")
+        if drift:
+            raise HTTPException(409, "state drifted: " + "; ".join(drift))
+
+    resp = await run_journaled(
+        capture,
+        rt.zone_lock(canonical_zone(entry["zone"])),
+        lambda: pdns.request(method, path, payload=payload or {}),
+        status_of=lambda r: r.status,
+        rollback_of=journal_id,
+        before_intent=drift_check,
+    )
+    if resp is None:
+        raise HTTPException(503, "journal unavailable, rollback refused")
     if resp.status >= 400:
         raise HTTPException(502, f"upstream rejected rollback: {resp.status}")
     result: dict[str, object] = {
@@ -417,13 +394,13 @@ async def register_zone(body: RegisterBody):
     creates with an unconditional 409 (verified in auth-5.1.x ws-auth.cc),
     so this credential structurally cannot modify existing data."""
     rt, identity = _runtime(), _identity()
-    if not (identity.is_admin or "registrar" in identity.roles):
+    if not (identity.is_admin or REGISTRAR in identity.roles):
         raise HTTPException(403, "registrar or admin required")
     reg = rt.settings.registration
     if reg is None:
         raise HTTPException(501, "registration not configured")
     zone = canonical_zone(body.zone)
-    tn = canonical_tn(body.user)
+    user = canonical_user(body.user)
     view = rt.mapping.view
     for denied in view.deny_zones:
         if zone_is_or_under(zone, denied):
@@ -447,21 +424,16 @@ async def register_zone(body: RegisterBody):
     assert info is not None
     # Journal against the target User so the registration shows up in
     # their own journal history; actor stays the registrar credential.
-    journal_identity = dataclasses.replace(identity, effective_teilnehmer=tn)
+    journal_identity = dataclasses.replace(identity, effective_user=user)
     capture = JournalCapture(rt, pdns, journal_identity, "POST", path, info, payload)
-    # Per-zone serialization, same as JournalMiddleware.
-    async with rt.zone_lock(zone):
-        try:
-            await capture.intent()
-        except Exception:
-            logger.exception("journal intent failed for register (fail-closed)")
-            raise HTTPException(503, "journal unavailable, registration refused")
-        try:
-            resp = await pdns.request("POST", path, payload=payload)
-        except BaseException:
-            await capture.mark_uncertain()
-            raise
-        await capture.finalize(resp.status)
+    resp = await run_journaled(
+        capture,
+        rt.zone_lock(zone),
+        lambda: pdns.request("POST", path, payload=payload),
+        status_of=lambda r: r.status,
+    )
+    if resp is None:
+        raise HTTPException(503, "journal unavailable, registration refused")
     if resp.status == 409:
         raise HTTPException(409, "zone already exists upstream")
     if resp.status >= 400:
@@ -474,7 +446,7 @@ async def register_zone(body: RegisterBody):
         # have mapped the zone already — adding a second owner would break the
         # single-ownership invariant owner_of/rollback rely on.
         owner = rt.mapping.view.owner_of(zone)
-        if owner == tn:
+        if owner == user:
             generation = rt.mapping.view.generation  # already mapped, done
             break
         if owner is not None:
@@ -482,7 +454,7 @@ async def register_zone(body: RegisterBody):
             break
         try:
             generation = await rt.mapping.patch(
-                rt.mapping.view.generation, {tn: [zone]}, {}, identity.actor
+                rt.mapping.view.generation, {user: [zone]}, {}, identity.actor
             )
             break
         except GenerationMismatch:
@@ -493,17 +465,17 @@ async def register_zone(body: RegisterBody):
         # (journaled); the conflict needs human/exporter resolution.
         logger.error(
             f"register: {zone} concurrently mapped to {conflicting_owner}, "
-            f"not {tn} — leaving mapping untouched (journal {capture.journal_id})"
+            f"not {user} — leaving mapping untouched (journal {capture.journal_id})"
         )
         raise HTTPException(409, "zone created but concurrently mapped to another User")
     if generation is None:
         # Zone exists but unowned; the next exporter push (member DB is the
         # source of registrations) heals this. Surface it, don't hide it.
-        logger.error(f"mapping update failed after zone create ({zone} -> {tn})")
+        logger.error(f"mapping update failed after zone create ({zone} -> {user})")
     return JSONResponse(
         {
             "zone": zone,
-            "user": tn,
+            "user": user,
             "journal_id": capture.journal_id,
             "mapping_generation": generation,
         },
@@ -515,20 +487,20 @@ async def register_zone(body: RegisterBody):
 
 
 class KeyCreate(BaseModel):
-    label: Optional[str] = None
+    label: str | None = None
 
 
 @router.get("/keys")
 async def list_keys():
     rt, identity = _runtime(), _identity()
-    tn = _require_tn(identity)
-    return {"keys": await rt.store.list_keys(tn)}
+    user = _require_user(identity)
+    return {"keys": await rt.store.list_keys(user)}
 
 
 @router.post("/keys", status_code=201)
 async def create_key(body: KeyCreate):
     rt, identity = _runtime(), _identity()
-    tn = _require_tn(identity)
+    user = _require_user(identity)
     # Minting requires a strongly-authenticated OIDC session (admin
     # impersonation now, member OIDC later). The shared webui act-as token
     # deliberately cannot mint: a compromised UI host must not be able to
@@ -539,7 +511,7 @@ async def create_key(body: KeyCreate):
     plaintext, prefix, key_hash = generate_key()
     try:
         key_id = await rt.store.insert_key(
-            tn,
+            user,
             prefix,
             key_hash,
             body.label,
@@ -556,7 +528,7 @@ async def create_key(body: KeyCreate):
 @router.delete("/keys/{key_id}")
 async def revoke_key(key_id: int):
     rt, identity = _runtime(), _identity()
-    scope = None if identity.is_admin else _require_tn(identity)
+    scope = None if identity.is_admin else _require_user(identity)
     if not await rt.store.revoke_key(key_id, scope):
         raise HTTPException(404, "key not found")
     return {"revoked": key_id}
@@ -572,7 +544,9 @@ async def whoami():
         "kind": identity.kind,
         "actor": identity.actor,
         "display": identity.display,
-        "effective_teilnehmer": identity.effective_teilnehmer,
+        # wire name stays teilnehmer (docs/api-contract.md line 52); the
+        # internal field is effective_user
+        "effective_teilnehmer": identity.effective_user,
         "impersonator": identity.impersonator,
         "webui_user": identity.webui_user,
         "is_admin": identity.is_admin,
@@ -592,7 +566,7 @@ async def ready():
     # is_admin, never via the roles list: an act-as identity inherits its
     # env's full role list without being an admin.
     if not (
-        identity.is_admin or "exporter" in identity.roles or "metrics" in identity.roles
+        identity.is_admin or EXPORTER in identity.roles or METRICS in identity.roles
     ):
         raise HTTPException(403, "admin, exporter or metrics credential required")
     from powerdns_api_proxy.proxy import pdns
@@ -618,15 +592,9 @@ async def ready():
 
 @router.post("/admin/reload")
 async def admin_reload():
-    _identity_admin()
+    _require_admin(_identity())
     from powerdns_api_proxy.inberlin.reload import reload_static_config
 
     # sync file read + YAML parse — keep it off the event loop
     await asyncio.to_thread(reload_static_config)
     return {"reloaded": True}
-
-
-def _identity_admin() -> Identity:
-    identity = _identity()
-    _require_admin(identity)
-    return identity

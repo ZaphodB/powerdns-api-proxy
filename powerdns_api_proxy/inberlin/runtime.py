@@ -4,7 +4,6 @@ lifespan. None when the `inberlin:` config block is absent (extension off)."""
 import asyncio
 import sqlite3
 import weakref
-from typing import Optional
 
 from prometheus_client import REGISTRY
 from prometheus_client.core import GaugeMetricFamily
@@ -31,10 +30,10 @@ class Runtime:
         self.settings = settings
         self.store = Store(settings.state_db)
         self.mapping = MappingState(self.store, settings.deny_zones)
-        self.oidc: Optional[OIDCValidator] = (
+        self.oidc: OIDCValidator | None = (
             OIDCValidator(settings.oidc) if settings.oidc else None
         )
-        self._prune_task: Optional[asyncio.Task] = None
+        self._prune_task: asyncio.Task | None = None
         # WeakValueDictionary: a lock lives only while some task holds a
         # strong reference (i.e. is inside the `async with`). Zone names come
         # from authenticated-but-arbitrary request paths — a plain dict would
@@ -61,7 +60,7 @@ class Runtime:
         await self.mapping.load()
         logger.info(
             f"inberlin runtime up: mapping generation {self.mapping.view.generation}, "
-            f"{len(self.mapping.view.zones_by_tn)} user"
+            f"{len(self.mapping.view.zones_by_user)} user"
         )
         self._prune_task = asyncio.create_task(self._prune_loop())
 
@@ -88,14 +87,14 @@ class Runtime:
         return tuple(self.settings.environment_roles.get(env_name, ()))
 
 
-_runtime: Optional[Runtime] = None
+_runtime: Runtime | None = None
 
 
-def get_runtime() -> Optional[Runtime]:
+def get_runtime() -> Runtime | None:
     return _runtime
 
 
-async def init_runtime() -> Optional[Runtime]:
+async def init_runtime() -> Runtime | None:
     """App-lifespan entry point: build and start the runtime, or return None
     (extension disabled) when no `inberlin:` config block exists."""
     global _runtime

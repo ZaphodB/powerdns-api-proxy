@@ -6,7 +6,7 @@ Authorization must never use raw string suffix matching (docs/authz-flow.md §5)
 import unicodedata
 
 
-def canonical_tn(name: str) -> str:
+def canonical_user(name: str) -> str:
     """Canonical User identifier: NFC, lowercase, stripped."""
     return unicodedata.normalize("NFC", name.strip()).lower()
 

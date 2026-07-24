@@ -12,7 +12,7 @@ journal middleware semantics by journaling a new entry with rollback_of set.
 """
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 from powerdns_api_proxy.inberlin.journal import fetch_zone, rrsets_by_key
 from powerdns_api_proxy.inberlin.names import canonical_zone
@@ -31,7 +31,7 @@ class NotRollbackable(Exception):
     """Entry has no inverse (crypto/tsig/meta ops, or missing recorded state)."""
 
 
-def _normalize_rrset(rrset: Optional[dict]) -> Optional[dict]:
+def _normalize_rrset(rrset: dict | None) -> dict | None:
     """Canonical comparable form (name canonicalized, records sorted) for drift checks."""
     if rrset is None:
         return None
@@ -92,7 +92,7 @@ async def check_drift(
     return drift
 
 
-def zone_state_drift(live: Optional[dict], recorded_after: Optional[dict]) -> list[str]:
+def zone_state_drift(live: dict | None, recorded_after: dict | None) -> list[str]:
     """Drift between a live zone and a recorded whole-zone after-state
     (zone-create rollback: the zone about to be deleted must still look
     exactly like it did right after creation)."""
@@ -109,7 +109,28 @@ def zone_state_drift(live: Optional[dict], recorded_after: Optional[dict]) -> li
     return drift
 
 
-def build_rollback_request(entry: dict) -> tuple[str, str, Optional[dict[str, Any]]]:
+async def check_entry_drift(
+    entry: dict, pdns: PDNSConnector, server_id: str
+) -> list[str]:
+    """Drift between live upstream state and the entry's recorded after-state
+    (empty = safe to apply the inverse). Every rollbackable operation gets a
+    check, not just RRset patches: deleting a zone that changed since
+    creation, or recreating one that already exists again, silently destroys
+    someone else's later work. Raises RuntimeError on upstream failure."""
+    op = entry["operation"]
+    if op == "rrset-patch":
+        return await check_drift(pdns, server_id, entry["zone"], entry["rrsets"])
+    if op == "zone-create":
+        live = await fetch_zone(pdns, server_id, entry["zone"])
+        after = json.loads(entry["after_state"]) if entry.get("after_state") else None
+        return zone_state_drift(live, after)
+    if op == "zone-delete":
+        live = await fetch_zone(pdns, server_id, entry["zone"])
+        return [] if live is None else ["zone was recreated since this entry"]
+    return []
+
+
+def build_rollback_request(entry: dict) -> tuple[str, str, dict[str, Any] | None]:
     """Returns (method, path_suffix, body) to execute against /api/v1.
 
     path_suffix is relative to /api/v1/servers/{server_id}.

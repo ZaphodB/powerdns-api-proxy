@@ -1,4 +1,4 @@
-"""SQLite state store: mapping snapshot, override grants, TN api keys, journal.
+"""SQLite state store: mapping snapshot, override grants, User api keys, journal.
 
 Single-writer discipline: all writes go through Store._write() which holds an
 asyncio.Lock and runs the sync sqlite3 work in a thread (never blocking the
@@ -12,10 +12,14 @@ import asyncio
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from powerdns_api_proxy.logging import logger
+
+if TYPE_CHECKING:
+    from powerdns_api_proxy.inberlin.identity import Identity
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS mapping_snapshot (
@@ -74,7 +78,7 @@ CREATE TABLE IF NOT EXISTS journal (
   resolved_by TEXT
 );
 CREATE INDEX IF NOT EXISTS journal_zone_ts ON journal(zone, ts);
-CREATE INDEX IF NOT EXISTS journal_tn_ts ON journal(user, ts);
+CREATE INDEX IF NOT EXISTS journal_user_ts ON journal(user, ts);
 CREATE INDEX IF NOT EXISTS journal_status ON journal(status);
 CREATE INDEX IF NOT EXISTS journal_rollback_of ON journal(rollback_of);
 CREATE TABLE IF NOT EXISTS journal_rrset (
@@ -195,7 +199,7 @@ class Store:
     async def load_mapping(
         self,
     ) -> tuple[int, str, dict[str, set[str]], dict[str, str]]:
-        """Returns (generation, applied_at, {tn: {zones}}, {override_zone: tn}).
+        """Returns (generation, applied_at, {user: {zones}}, {override_zone: user}).
 
         applied_at is the commit timestamp of the latest generation ("" for an
         empty store)."""
@@ -236,7 +240,7 @@ class Store:
             c.execute("DELETE FROM mapping_entry")
             c.executemany(
                 "INSERT INTO mapping_entry (user, zone) VALUES (?, ?)",
-                [(tn, z) for tn, zones in mapping.items() for z in zones],
+                [(user, z) for user, zones in mapping.items() for z in zones],
             )
             return new_gen, applied_at
 
@@ -309,7 +313,7 @@ class Store:
 
     # -- user identity bridge --------------------------------------
 
-    async def user_for_sub(self, oidc_sub: str) -> Optional[str]:
+    async def user_for_sub(self, oidc_sub: str) -> str | None:
         return await self._read(
             lambda c: (lambda row: row["user"] if row else None)(
                 c.execute(
@@ -338,7 +342,7 @@ class Store:
         via: str,
         max_keys: int,
     ) -> int:
-        """Inserts a key, enforcing the per-TN cap inside the same transaction
+        """Inserts a key, enforcing the per-User cap inside the same transaction
         (a router-side pre-check alone would be a TOCTOU across two awaits)."""
 
         def run(c: sqlite3.Connection) -> int:
@@ -421,19 +425,15 @@ class Store:
 
     async def journal_intent(
         self,
+        identity: Identity,
         *,
-        user: Optional[str],
-        actor: str,
-        actor_kind: str,
-        impersonator: Optional[str],
-        webui_user: Optional[str],
         zone: str,
         method: str,
         path: str,
         operation: str,
-        raw_request: Optional[str],
-        before_state: Optional[str],
-        rollback_of: Optional[int] = None,
+        raw_request: str | None,
+        before_state: str | None,
+        rollback_of: int | None = None,
     ) -> int:
         def run(c: sqlite3.Connection) -> int:
             cur = c.execute(
@@ -443,11 +443,11 @@ class Store:
                 " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _utcnow(),
-                    user,
-                    actor,
-                    actor_kind,
-                    impersonator,
-                    webui_user,
+                    identity.effective_user,
+                    identity.actor,
+                    identity.kind,
+                    identity.impersonator,
+                    identity.webui_user,
                     zone,
                     method,
                     path,
@@ -466,10 +466,10 @@ class Store:
         journal_id: int,
         *,
         status: str,
-        status_code: Optional[int],
-        after_state: Optional[str],
+        status_code: int | None,
+        after_state: str | None,
         rollbackable: bool,
-        rrsets: Optional[list[tuple[str, str, Optional[str], Optional[str]]]] = None,
+        rrsets: list[tuple[str, str, str | None, str | None]] | None = None,
     ) -> None:
         rrsets = rrsets or []
 
@@ -492,7 +492,7 @@ class Store:
 
         await self._write(run)
 
-    async def journal_get(self, journal_id: int) -> Optional[dict]:
+    async def journal_get(self, journal_id: int) -> dict | None:
         def run(c: sqlite3.Connection):
             row = c.execute(
                 "SELECT * FROM journal WHERE id = ?", (journal_id,)
@@ -515,13 +515,13 @@ class Store:
     async def journal_query(
         self,
         *,
-        user: Optional[str] = None,
-        zone: Optional[str] = None,
-        name: Optional[str] = None,
-        rtype: Optional[str] = None,
-        since: Optional[str] = None,
-        until: Optional[str] = None,
-        status: Optional[str] = None,
+        user: str | None = None,
+        zone: str | None = None,
+        name: str | None = None,
+        rtype: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:

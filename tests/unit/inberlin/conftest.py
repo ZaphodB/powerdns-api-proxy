@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 import time
-from typing import Generator
+from collections.abc import Generator
 from unittest.mock import patch
 
 os.environ.setdefault("PROXY_CONFIG_PATH", "./config-example.yml")

@@ -3,7 +3,6 @@ import pytest
 from powerdns_api_proxy.config import load_config
 from powerdns_api_proxy.inberlin import reload as reload_mod
 
-
 VALID = """
 pdns_api_url: "http://127.0.0.1:8081"
 pdns_api_token: "tok"

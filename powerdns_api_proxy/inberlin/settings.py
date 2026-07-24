@@ -6,7 +6,6 @@ upstream behavior unchanged.
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel
 from yaml import safe_load
@@ -36,12 +35,12 @@ class RegistrationSettings(BaseModel):
 class InBerlinSettings(BaseModel):
     enabled: bool = True
     state_db: str = "/var/lib/pdns-api-proxy/state.sqlite"
-    oidc: Optional[OIDCSettings] = None
+    oidc: OIDCSettings | None = None
     deny_zones: list[str] = []
     # environment name -> roles (admin | exporter | webui | metrics | registrar)
     environment_roles: dict[str, list[str]] = {}
     # required for /proxy/v1/register; absent = registration disabled (501)
-    registration: Optional[RegistrationSettings] = None
+    registration: RegistrationSettings | None = None
     journal_retention_days: int = 730
     upstream_server_id: str = "localhost"
     max_keys_per_teilnehmer: int = 10
@@ -57,7 +56,7 @@ class InBerlinSettings(BaseModel):
 
 
 @lru_cache(maxsize=1)
-def load_inberlin_settings(path: Optional[Path] = None) -> Optional[InBerlinSettings]:
+def load_inberlin_settings(path: Path | None = None) -> InBerlinSettings | None:
     """Parse the `inberlin:` block from PROXY_CONFIG_PATH (or explicit path).
 
     Returns None when the block is absent or `enabled: false` — the extension

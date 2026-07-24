@@ -5,9 +5,11 @@ Write-ahead state machine: intent row (pending) BEFORE forwarding, fail-closed
 failed / uncertain. Cryptokey/tsigkey bodies are never stored.
 """
 
+import asyncio
 import json
 import re
-from typing import Any, Optional
+from collections.abc import Awaitable, Callable
+from typing import NamedTuple, TypeVar
 
 from powerdns_api_proxy.inberlin.identity import Identity
 from powerdns_api_proxy.inberlin.names import canonical_zone
@@ -20,39 +22,62 @@ _ZONE_PATH = re.compile(
 )
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
-SECRET_OPS = {"crypto", "tsig"}
+
+class OpInfo(NamedTuple):
+    """classify() result: what a mutating /api/v1 request means for the journal."""
+
+    operation: str
+    server_id: str
+    zone_id: str | None
 
 
-def classify(method: str, path: str) -> Optional[dict[str, Any]]:
-    """Returns {operation, server_id, zone_id} for journal-relevant requests."""
+class OpSpec(NamedTuple):
+    """Per-operation journal behavior. Adding an operation means adding a row
+    to OPERATIONS (plus its inverse in rollback.py) — not hunting if-cascades
+    across capture, finalize, rollback, and drift code."""
+
+    secret: bool = False  # body never journaled (crypto/tsig)
+    pre_get: bool = False  # intent fetches the before-zone
+    rrset_diff: bool = False  # before/after captured as a scoped rrset diff
+    recreate: bool = False  # finalize re-fetches the created zone
+    restore_from_before: bool = False  # rollbackable iff the before-zone existed
+
+
+OPERATIONS: dict[str, OpSpec] = {
+    "rrset-patch": OpSpec(pre_get=True, rrset_diff=True),
+    "zone-create": OpSpec(recreate=True),
+    "zone-delete": OpSpec(pre_get=True, restore_from_before=True),
+    "zone-meta": OpSpec(pre_get=True),
+    "crypto": OpSpec(secret=True),
+    "tsig": OpSpec(secret=True),
+    "other": OpSpec(),
+}
+
+
+def classify(method: str, path: str) -> OpInfo | None:
+    """Returns OpInfo for journal-relevant requests, else None."""
     if method not in _MUTATING:
         return None
     m = _ZONE_PATH.match(path)
     if not m:
         if re.match(r"^/api/v1/servers/[^/]+/tsigkeys", path):
-            return {
-                "operation": "tsig",
-                "server_id": path.split("/")[4],
-                "zone_id": None,
-            }
+            return OpInfo("tsig", path.split("/")[4], None)
         return None
     server, zone, rest = m.group("server"), m.group("zone"), m.group("rest") or ""
     if zone is None:
-        return {"operation": "zone-create", "server_id": server, "zone_id": None}
+        return OpInfo("zone-create", server, None)
     if "/cryptokeys" in rest:
-        return {"operation": "crypto", "server_id": server, "zone_id": zone}
+        return OpInfo("crypto", server, zone)
     if rest in ("/notify", "/rectify"):
-        return {"operation": "other", "server_id": server, "zone_id": zone}
+        return OpInfo("other", server, zone)
     if method == "PATCH":
-        return {"operation": "rrset-patch", "server_id": server, "zone_id": zone}
+        return OpInfo("rrset-patch", server, zone)
     if method == "DELETE":
-        return {"operation": "zone-delete", "server_id": server, "zone_id": zone}
-    return {"operation": "zone-meta", "server_id": server, "zone_id": zone}
+        return OpInfo("zone-delete", server, zone)
+    return OpInfo("zone-meta", server, zone)
 
 
-async def fetch_zone(
-    pdns: PDNSConnector, server_id: str, zone_id: str
-) -> Optional[dict]:
+async def fetch_zone(pdns: PDNSConnector, server_id: str, zone_id: str) -> dict | None:
     """Full zone incl. rrsets; None if the zone does not exist."""
     resp = await pdns.get(f"/api/v1/servers/{server_id}/zones/{zone_id}")
     if resp.status == 404:
@@ -62,14 +87,14 @@ async def fetch_zone(
     return json.loads(await resp.text())
 
 
-def rrsets_by_key(zone: Optional[dict]) -> dict[tuple[str, str], dict]:
+def rrsets_by_key(zone: dict | None) -> dict[tuple[str, str], dict]:
     """Zone rrsets indexed by (canonical name, type); {} for a missing zone."""
     if not zone:
         return {}
     return {(canonical_zone(r["name"]), r["type"]): r for r in zone.get("rrsets", [])}
 
 
-def affected_rrset_keys(body: Optional[dict]) -> list[tuple[str, str]]:
+def affected_rrset_keys(body: dict | None) -> list[tuple[str, str]]:
     """(name, type) keys a PATCH body touches — scopes the before/after diff."""
     if not body:
         return []
@@ -84,7 +109,7 @@ def diff_rrsets(
     keys: list[tuple[str, str]],
     before: dict[tuple[str, str], dict],
     after: dict[tuple[str, str], dict],
-) -> list[tuple[str, str, Optional[str], Optional[str]]]:
+) -> list[tuple[str, str, str | None, str | None]]:
     """journal_rrset rows (name, type, before_json, after_json) for the touched keys."""
     rows = []
     for name, rtype in keys:
@@ -107,8 +132,8 @@ class JournalCapture:
         identity: Identity,
         method: str,
         path: str,
-        info: dict[str, Any],
-        body: Optional[dict],
+        info: OpInfo,
+        body: dict | None,
     ):
         self.runtime = runtime
         self.pdns = pdns
@@ -117,29 +142,34 @@ class JournalCapture:
         self.path = path
         self.info = info
         self.body = body
-        self.journal_id: Optional[int] = None
-        self._before_zone: Optional[dict] = None
+        self.journal_id: int | None = None
+        self._before_zone: dict | None = None
         self._keys: list[tuple[str, str]] = []
 
     @property
     def operation(self) -> str:
-        return self.info["operation"]
+        return self.info.operation
+
+    @property
+    def _spec(self) -> OpSpec:
+        return OPERATIONS[self.operation]
 
     def zone_name(self) -> str:
         """Canonical zone for the journal row; '.' when undeterminable."""
-        if self.info["zone_id"]:
-            return canonical_zone(self.info["zone_id"])
-        if self.operation == "zone-create" and self.body and self.body.get("name"):
+        if self.info.zone_id:
+            return canonical_zone(self.info.zone_id)
+        if self._spec.recreate and self.body and self.body.get("name"):
             return canonical_zone(self.body["name"])
         return "."
 
-    async def intent(self, rollback_of: Optional[int] = None) -> None:
+    async def intent(self, rollback_of: int | None = None) -> None:
         """Pre-GET + insert pending row. Raises on store failure (fail-closed)."""
-        server, zone_id = self.info["server_id"], self.info["zone_id"]
-        before_state: Optional[str] = None
-        if zone_id and self.operation in ("rrset-patch", "zone-delete", "zone-meta"):
+        server, zone_id = self.info.server_id, self.info.zone_id
+        spec = self._spec
+        before_state: str | None = None
+        if zone_id and spec.pre_get:
             self._before_zone = await fetch_zone(self.pdns, server, zone_id)
-            if self.operation == "rrset-patch":
+            if spec.rrset_diff:
                 self._keys = affected_rrset_keys(self.body)
                 before_map = rrsets_by_key(self._before_zone)
                 before_state = json.dumps(
@@ -148,14 +178,10 @@ class JournalCapture:
             else:
                 before_state = json.dumps(self._before_zone)
         raw = None
-        if self.operation not in SECRET_OPS and self.body is not None:
+        if not spec.secret and self.body is not None:
             raw = json.dumps(self.body)
         self.journal_id = await self.runtime.store.journal_intent(
-            user=self.identity.effective_teilnehmer,
-            actor=self.identity.actor,
-            actor_kind=self.identity.kind,
-            impersonator=self.identity.impersonator,
-            webui_user=self.identity.webui_user,
+            self.identity,
             zone=self.zone_name(),
             method=self.method,
             path=self.path,
@@ -209,11 +235,12 @@ class JournalCapture:
             )
             return
         try:
-            server, zone_id = self.info["server_id"], self.info["zone_id"]
-            after_state: Optional[str] = None
-            rrset_rows: list[tuple[str, str, Optional[str], Optional[str]]] = []
+            server, zone_id = self.info.server_id, self.info.zone_id
+            spec = self._spec
+            after_state: str | None = None
+            rrset_rows: list[tuple[str, str, str | None, str | None]] = []
             rollbackable = False
-            if self.operation == "rrset-patch" and zone_id:
+            if spec.rrset_diff and zone_id:
                 after_zone = await fetch_zone(self.pdns, server, zone_id)
                 rrset_rows = diff_rrsets(
                     self._keys,
@@ -221,9 +248,9 @@ class JournalCapture:
                     rrsets_by_key(after_zone),
                 )
                 rollbackable = True
-            elif self.operation == "zone-delete":
+            elif spec.restore_from_before:
                 rollbackable = self._before_zone is not None
-            elif self.operation == "zone-create":
+            elif spec.recreate:
                 created = await fetch_zone(self.pdns, server, self.zone_name())
                 after_state = json.dumps(created) if created else None
                 rollbackable = created is not None
@@ -247,3 +274,48 @@ class JournalCapture:
                 )
             except Exception:
                 logger.exception("could not even mark journal entry uncertain")
+
+
+T = TypeVar("T")
+
+
+async def run_journaled(
+    capture: JournalCapture,
+    lock: asyncio.Lock,
+    forward: Callable[[], Awaitable[T]],
+    *,
+    status_of: Callable[[T], int],
+    rollback_of: int | None = None,
+    before_intent: Callable[[], Awaitable[None]] | None = None,
+) -> T | None:
+    """The one journaled-execution shape (docs/authz-flow.md §6-8), shared by
+    JournalMiddleware, rollback, and register:
+
+        intent row (fail-closed) → forward → finalize, serialized per zone
+        (overlapping writes would capture stale before/after states);
+        uncertain on in-flight exceptions.
+
+    before_intent runs inside the lock just before the intent row — rollback's
+    drift check lives there (a concurrent write between check and apply would
+    be silently clobbered otherwise). Exceptions from it propagate.
+
+    Returns forward()'s response, or None when the journal intent failed —
+    the caller surfaces its own 503 (middleware returns a response, routers
+    raise HTTPException)."""
+    async with lock:
+        if before_intent is not None:
+            await before_intent()
+        try:
+            await capture.intent(rollback_of=rollback_of)
+        except Exception:
+            logger.exception("journal intent failed (fail-closed)")
+            return None
+        try:
+            resp = await forward()
+        except BaseException:
+            # The mutation may already have reached pdns; never leave the row
+            # pending. Mark it uncertain for admin reconciliation, then re-raise.
+            await capture.mark_uncertain()
+            raise
+        await capture.finalize(status_of(resp))
+    return resp

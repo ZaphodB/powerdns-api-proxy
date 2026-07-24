@@ -7,7 +7,7 @@ downtime (only OIDC requests fail while unreachable).
 
 import asyncio
 import time
-from typing import Any, Optional
+from typing import Any
 
 import aiohttp
 import jwt
@@ -31,12 +31,12 @@ class OIDCValidator:
         discovery = (
             self.settings.issuer.rstrip("/") + "/.well-known/openid-configuration"
         )
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                discovery, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(discovery, timeout=aiohttp.ClientTimeout(total=10)) as resp,
+        ):
+            resp.raise_for_status()
+            data = await resp.json()
         return data["jwks_uri"]
 
     async def _refresh(self) -> None:
@@ -55,12 +55,12 @@ class OIDCValidator:
             # fetch attempts (10s timeout each) while the IdP is down
             self._fetched_at = time.monotonic()
             url = await self._jwks_url()
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp,
+            ):
+                resp.raise_for_status()
+                data = await resp.json()
             keys: dict[str, PyJWK] = {}
             for k in data.get("keys", []):
                 if k.get("use") not in (None, "sig"):
@@ -74,7 +74,7 @@ class OIDCValidator:
             self._jwks = keys
             logger.info(f"JWKS refreshed, {len(keys)} signing keys")
 
-    async def _key_for(self, kid: str) -> Optional[PyJWK]:
+    async def _key_for(self, kid: str) -> PyJWK | None:
         """Signing key for kid; refreshes on TTL expiry or unknown kid."""
         if kid in self._jwks:
             stale = time.monotonic() - self._fetched_at > self.settings.jwks_ttl_seconds

@@ -566,13 +566,11 @@ def test_journal_uncertain_includes_live_upstream(client):
     rt = runtime_mod.get_runtime()
 
     async def seed():
+        from powerdns_api_proxy.inberlin.identity import Identity
+
         for zone in ("kunde.example.", "gone.example."):
             jid = await rt.store.journal_intent(
-                user="alice",
-                actor="webui",
-                actor_kind="webui-act-as",
-                impersonator=None,
-                webui_user=None,
+                Identity(kind="webui-act-as", actor="webui", effective_user="alice"),
                 zone=zone,
                 method="PATCH",
                 path=f"/api/v1/servers/localhost/zones/{zone}",
@@ -636,7 +634,7 @@ def test_journal_db_size_gauge_on_metrics(client):
 
     r = client.get("/metrics", auth=("metrics", METRICS_TOKEN))
     assert r.status_code == 200
-    match = re.search(r"^inberlin_journal_db_bytes ([\d.eE+]+)", r.text, re.M)
+    match = re.search(r"^inberlin_journal_db_bytes ([\d.eE+]+)", r.text, re.MULTILINE)
     assert match, "journal DB size gauge missing from /metrics"
     assert float(match.group(1)) > 0
 

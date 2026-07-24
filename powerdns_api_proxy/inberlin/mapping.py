@@ -7,10 +7,9 @@ generation, so memory and disk cannot diverge on a successful request.
 
 import asyncio
 from dataclasses import dataclass
-from typing import Optional
 
 from powerdns_api_proxy.inberlin.names import (
-    canonical_tn,
+    canonical_user,
     canonical_zone,
     zone_depth,
     zone_is_or_under,
@@ -23,19 +22,19 @@ class MappingView:
     """Immutable snapshot of the authz mapping; replaced wholesale on update."""
 
     generation: int
-    zones_by_tn: dict[str, frozenset[str]]
-    overrides: dict[str, str]  # canonical zone -> canonical tn
+    zones_by_user: dict[str, frozenset[str]]
+    overrides: dict[str, str]  # canonical zone -> canonical user
     deny_zones: tuple[str, ...] = ()
     applied_at: str = ""  # commit timestamp of generation; "" for empty store
 
     def zones_for(self, user: str) -> set[str]:
         """Mapped zones plus override grants for a User (canonical)."""
-        tn = canonical_tn(user)
-        zones = set(self.zones_by_tn.get(tn, frozenset()))
-        zones.update(z for z, owner in self.overrides.items() if owner == tn)
+        canonical = canonical_user(user)
+        zones = set(self.zones_by_user.get(canonical, frozenset()))
+        zones.update(z for z, owner in self.overrides.items() if owner == canonical)
         return zones
 
-    def owner_of(self, zone: str) -> Optional[str]:
+    def owner_of(self, zone: str) -> str | None:
         """Resolution per docs/authz-flow.md §5: deny set, then most-specific
         override on the zone or an ancestor, then longest owned suffix."""
         z = canonical_zone(zone)
@@ -56,12 +55,12 @@ class MappingView:
         if best_override is not None:
             return best_override[1]
         best_owned: tuple[int, str] | None = None
-        for tn, zones in self.zones_by_tn.items():
+        for user, zones in self.zones_by_user.items():
             for owned in zones:
                 if zone_is_or_under(z, owned):
                     depth = zone_depth(owned)
                     if best_owned is None or depth > best_owned[0]:
-                        best_owned = (depth, tn)
+                        best_owned = (depth, user)
         return best_owned[1] if best_owned else None
 
 
@@ -99,12 +98,12 @@ class MappingState:
         """Canonicalize all names once at build time so lookups stay cheap."""
         return MappingView(
             generation=generation,
-            zones_by_tn={
-                canonical_tn(tn): frozenset(canonical_zone(z) for z in zones)
-                for tn, zones in mapping.items()
+            zones_by_user={
+                canonical_user(user): frozenset(canonical_zone(z) for z in zones)
+                for user, zones in mapping.items()
             },
             overrides={
-                canonical_zone(z): canonical_tn(tn) for z, tn in overrides.items()
+                canonical_zone(z): canonical_user(user) for z, user in overrides.items()
             },
             deny_zones=self._deny,
             applied_at=applied_at,
@@ -115,8 +114,8 @@ class MappingState:
     ) -> int:
         """Full replace (PUT). CAS on expected_generation; returns new generation."""
         normalized = {
-            canonical_tn(tn): {canonical_zone(z) for z in zones}
-            for tn, zones in mapping.items()
+            canonical_user(user): {canonical_zone(z) for z in zones}
+            for user, zones in mapping.items()
         }
         async with self._mutation_lock:
             new_gen, applied_at = await self._store.save_mapping(
@@ -139,17 +138,19 @@ class MappingState:
     ) -> int:
         """Incremental add/remove (PATCH). Same CAS semantics as replace()."""
         async with self._mutation_lock:
-            current = {tn: set(zones) for tn, zones in self.view.zones_by_tn.items()}
-            for tn, zones in add.items():
-                current.setdefault(canonical_tn(tn), set()).update(
+            current = {
+                user: set(zones) for user, zones in self.view.zones_by_user.items()
+            }
+            for user, zones in add.items():
+                current.setdefault(canonical_user(user), set()).update(
                     canonical_zone(z) for z in zones
                 )
-            for tn, zones in remove.items():
-                ctn = canonical_tn(tn)
-                if ctn in current:
-                    current[ctn] -= {canonical_zone(z) for z in zones}
-                    if not current[ctn]:
-                        del current[ctn]
+            for user, zones in remove.items():
+                cuser = canonical_user(user)
+                if cuser in current:
+                    current[cuser] -= {canonical_zone(z) for z in zones}
+                    if not current[cuser]:
+                        del current[cuser]
             new_gen, applied_at = await self._store.save_mapping(
                 expected_generation,
                 current,
@@ -167,7 +168,7 @@ class MappingState:
         zone: str,
         user: str,
         actor: str,
-        note: Optional[str],
+        note: str | None,
     ) -> tuple[int, int]:
         """Persist an override grant and republish the view atomically.
 
@@ -203,6 +204,6 @@ class MappingState:
         """Override zones whose grantee has no mapping entry at all."""
         return [
             z
-            for z, tn in self.view.overrides.items()
-            if tn not in self.view.zones_by_tn
+            for z, user in self.view.overrides.items()
+            if user not in self.view.zones_by_user
         ]
