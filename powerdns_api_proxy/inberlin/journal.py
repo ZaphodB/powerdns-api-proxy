@@ -279,6 +279,25 @@ class JournalCapture:
 T = TypeVar("T")
 
 
+# Strong refs keep the settle tasks alive until done (a bare create_task
+# result can be garbage-collected mid-flight).
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _settle_in_background(coro: Awaitable[None], label: str) -> None:
+    """Run a journal-settling DB write as its own task, outside the request's
+    (possibly cancelled) scope, and log if it fails."""
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.error(f"journal settle ({label}) failed: {t.exception()!r}")
+
+    task.add_done_callback(_done)
+
+
 async def run_journaled(
     capture: JournalCapture,
     lock: asyncio.Lock,
@@ -314,8 +333,21 @@ async def run_journaled(
             resp = await forward()
         except BaseException:
             # The mutation may already have reached pdns; never leave the row
-            # pending. Mark it uncertain for admin reconciliation, then re-raise.
-            await capture.mark_uncertain()
+            # pending. A client disconnect cancels this task, and under
+            # anyio's level-based cancellation an inline await here would be
+            # re-cancelled before the DB write lands (gemini round 10) — so
+            # settle the row outside the cancelled scope, then re-raise.
+            _settle_in_background(capture.mark_uncertain(), "mark_uncertain")
             raise
-        await capture.finalize(status_of(resp))
+        fin = asyncio.ensure_future(capture.finalize(status_of(resp)))
+        try:
+            await fin
+        except asyncio.CancelledError:
+            # Client walked away mid-finalize. Stop the (separate) finalize
+            # task and settle the row out-of-scope; journal_finalize only
+            # transitions pending/uncertain rows, so whichever write lands
+            # last cannot downgrade a committed row.
+            fin.cancel()
+            _settle_in_background(capture.mark_uncertain(), "finalize-cancelled")
+            raise
     return resp
