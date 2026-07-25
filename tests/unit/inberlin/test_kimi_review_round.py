@@ -77,23 +77,9 @@ def test_orphaned_role_key_detected_against_candidate_config():
     assert "registrar" in problem
 
 
-def test_reload_refuses_when_roles_no_longer_match(monkeypatch, tmp_path):
-    """A reload that would silently un-gate a credential must not proceed."""
-    config = make_config()
-    settings = InBerlinSettings(environment_roles={"nonexistent-env": ["registrar"]})
-
-    monkeypatch.setenv("PROXY_CONFIG_PATH", str(tmp_path / "config.yaml"))
-    monkeypatch.setattr(reload_mod, "load_config", lambda *a, **k: config)
-    monkeypatch.setattr(reload_mod, "reset_settings_cache", lambda: None)
-    monkeypatch.setattr(reload_mod, "load_inberlin_settings", lambda: settings)
-    applied = []
-    monkeypatch.setattr(reload_mod, "_apply_to_runtime", applied.append)
-
-    with pytest.raises(ValueError) as excinfo:
-        reload_mod._reload_locked()
-
-    assert "refusing reload" in str(excinfo.value)
-    assert applied == [], "settings must not go live when validation failed"
+# The end-to-end "a reload that would un-gate a credential is refused" case
+# lives in test_hy3_review_round.py, which additionally asserts that the refusal
+# leaves the settings cache untouched — the stricter property.
 
 
 # -- a skipped reload is not a successful reload ------------------------------

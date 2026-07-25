@@ -90,23 +90,27 @@ def _reload_locked() -> None:
     # forbidden, source address. The mirror-image case (widening source IPs while
     # rotating a token) is briefly permissive instead — unavoidable without one
     # atomic snapshot, which is why the deployment restarts rather than reloads.
-    reset_settings_cache()
-    settings = load_inberlin_settings()
+    # Validate the candidate settings WITHOUT touching the cache. __wrapped__
+    # bypasses the lru_cache deliberately: resetting the cache first and then
+    # refusing the reload would leave the new settings cached while the runtime
+    # kept the old ones — a "refused" reload that still half-applied, which is
+    # precisely the contract this function promises not to break.
+    candidate_settings = load_inberlin_settings.__wrapped__(Path(path))
 
-    # Same cross-check init_runtime() does, against the CANDIDATE environments —
-    # not the ones still cached, which is why it happens here rather than inside
-    # _apply_to_runtime. Renaming an environment (or mistyping a role key) and
-    # reloading would otherwise leave the real environment with no roles, which
-    # silently disables the /api/v1 service-credential gate for it. Refusing the
-    # reload keeps the last known-good config live, matching the contract that a
-    # bad file never disturbs a running process.
-    if settings is not None:
+    # Same cross-check init_runtime() does, against the CANDIDATE environments
+    # rather than the ones still cached. Renaming an environment (or mistyping a
+    # role key) and reloading would otherwise leave the real environment with no
+    # roles, silently disabling the /api/v1 service-credential gate for it.
+    if candidate_settings is not None:
         from powerdns_api_proxy.inberlin.runtime import roles_vs_environments_error
 
-        problem = roles_vs_environments_error(settings, candidate)
+        problem = roles_vs_environments_error(candidate_settings, candidate)
         if problem:
             raise ValueError(f"refusing reload: {problem}")
 
+    # Candidate is good on every axis we can check — now mutate live state.
+    reset_settings_cache()
+    settings = load_inberlin_settings()
     _apply_to_runtime(settings)
 
     load_config.cache_clear()

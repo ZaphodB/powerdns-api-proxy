@@ -46,6 +46,17 @@ class InBerlinSettings(BaseModel):
     # environment name -> roles (admin | exporter | webui | metrics | registrar)
     environment_roles: dict[str, list[str]] = {}
 
+    @field_validator("deny_zones", "deny_zones_exact")
+    @classmethod
+    def _no_empty_deny_entries(cls, value: list[str]) -> list[str]:
+        """An empty or whitespace-only deny entry canonicalizes to the root and
+        then matches nothing, so it protects nothing while looking like it does.
+        A deny list that silently ignores one of its entries is the same
+        fail-open shape as one that stops matching over a trailing dot."""
+        if any(not entry.strip() for entry in value):
+            raise ValueError("deny list entries must not be empty or whitespace")
+        return value
+
     @field_validator("environment_roles")
     @classmethod
     def _known_roles_only(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
