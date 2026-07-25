@@ -40,6 +40,19 @@ def test_zone_delete_still_classifies_as_zone_delete():
     assert classify("DELETE", ZONE).operation == "zone-delete"
 
 
+def test_metadata_kind_named_cryptokeys_is_not_a_cryptokey_op():
+    """The cryptokeys arm is a substring test, so /metadata/cryptokeys used to
+    classify as `crypto` (secret=True, body suppressed). Metadata is matched
+    first now."""
+    assert classify("PUT", f"{ZONE}/metadata/cryptokeys").operation == "zone-metadata"
+
+
+@pytest.mark.parametrize("path", [f"{ZONE}/cryptokeys", f"{ZONE}/cryptokeys/7"])
+def test_cryptokey_paths_still_classify_as_crypto(path):
+    info = classify("POST", path)
+    assert info.operation == "crypto"
+
+
 def test_zone_metadata_has_an_operations_entry():
     spec = OPERATIONS["zone-metadata"]
     assert spec.secret is False

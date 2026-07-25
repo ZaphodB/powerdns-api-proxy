@@ -1,3 +1,4 @@
+import hashlib
 import os
 from typing import Generator
 from unittest.mock import AsyncMock, patch
@@ -11,7 +12,10 @@ from powerdns_api_proxy.models import (
     ProxyConfigZone,
 )
 
-from powerdns_api_proxy.exceptions import NotAuthorizedException
+from powerdns_api_proxy.exceptions import (
+    MetadataNotAllowedException,
+    NotAuthorizedException,
+)
 from powerdns_api_proxy.proxy import app
 
 client = TestClient(app)
@@ -99,6 +103,76 @@ def test_api_root(fixture_patch_dummy_config):
     assert answer.status_code == 200
     assert 1 == data[0].get("version")
     assert data[0].get("compatibility")
+
+
+# --- metadata grant enforcement -------------------------------------------
+#
+# These pin WHICH check each metadata handler calls, which the 401/422 route
+# parametrizations above cannot: they only exercise the token dependency.
+# Every case below is refused before the handler touches upstream, so no
+# PDNSConnector mock is needed -- regressing a write handler to the read
+# check turns the expected 403 into an upstream call, and the test fails.
+
+metadata_readonly_token = "metadatareadonlytokenmetadatareadonly"
+metadata_readonly_token_sha512 = hashlib.sha512(
+    metadata_readonly_token.encode()
+).hexdigest()
+
+metadata_readonly_environment = ProxyConfigEnvironment(
+    name="Metadata read-only",
+    token_sha512=metadata_readonly_token_sha512,
+    zones=[
+        ProxyConfigZone(name="test.example.com.", metadata=True, read_only=True),
+    ],
+)
+metadata_grant_config = ProxyConfig(
+    pdns_api_token="blaaa",
+    pdns_api_url="bluub",
+    environments=[metadata_readonly_environment, dummy_proxy_environment],
+)
+
+METADATA = "/api/v1/servers/localhost/zones/test.example.com./metadata"
+
+
+@pytest.fixture()
+def fixture_patch_metadata_config() -> Generator[None, None, None]:
+    """Both the token dependency (config.load_config) and the handlers
+    (proxy.config, bound at import) must see the same config."""
+    with (
+        patch("powerdns_api_proxy.config.load_config") as load_config_patch,
+        patch("powerdns_api_proxy.proxy.config", metadata_grant_config),
+    ):
+        load_config_patch.return_value = metadata_grant_config
+        yield
+
+
+@pytest.mark.parametrize(
+    "method,path,body",
+    [
+        ("POST", METADATA, {"kind": "ALLOW-AXFR-FROM", "metadata": ["127.0.0.1/32"]}),
+        ("PUT", f"{METADATA}/ALLOW-AXFR-FROM", {"metadata": ["127.0.0.1/32"]}),
+        ("DELETE", f"{METADATA}/ALLOW-AXFR-FROM", None),
+    ],
+)
+def test_metadata_writes_refused_on_read_only_zone(
+    method, path, body, fixture_patch_metadata_config
+):
+    answer = client.request(
+        method,
+        path,
+        headers={"X-API-Key": metadata_readonly_token},
+        json=body,
+    )
+    assert answer.status_code == 403
+    assert answer.json()["error"] == MetadataNotAllowedException().detail
+
+
+@pytest.mark.parametrize("path", [METADATA, f"{METADATA}/ALLOW-AXFR-FROM"])
+def test_metadata_reads_refused_without_grant(path, fixture_patch_metadata_config):
+    """dummy_proxy_environment holds the same zone with no metadata grant."""
+    answer = client.get(path, headers={"X-API-Key": dummy_proxy_environment_token})
+    assert answer.status_code == 403
+    assert answer.json()["error"] == MetadataNotAllowedException().detail
 
 
 def _wrong_token_request(client: TestClient, method: str, path: str):

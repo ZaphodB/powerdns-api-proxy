@@ -218,6 +218,10 @@ def check_pdns_metadata_allowed(environment: ProxyConfigEnvironment, zone: str) 
         return environment.get_zone_if_allowed(zone).metadata
     except ZoneNotAllowedException:
         pass
+    except Exception:
+        # Parity with check_pdns_zone_allowed: a malformed zone regex must
+        # deny, not surface as a 500 from this route only.
+        pass
 
     return False
 
@@ -238,6 +242,8 @@ def check_pdns_metadata_write_allowed(
         # Reaching here means global_metadata carried the read grant; there
         # is no zone entry that could mark it read-only.
         return True
+    except Exception:
+        return False
 
 
 def check_pdns_cryptokeys_allowed(

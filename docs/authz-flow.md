@@ -50,7 +50,20 @@ request
   │    - EXCEPT zone metadata: not granted to members (no metadata=True), it is
   │      an infra knob (ALLOW-AXFR-FROM, ENABLE-LUA-RECORDS); admins get
   │      global_metadata=True. Open decision — flip in authz.py if members
-  │      should own it too
+  │      should own it too. NOTE the grant is all-or-nothing per zone: the
+  │      proxy does no kind-level policy, it inherits pdns's own table
+  │      (ws-auth.cc isValidMetadataKind — LUA-AXFR-SCRIPT/NSEC3PARAM/
+  │      PRESIGNED/SOA-EDIT read-only, API-RECTIFY/ENABLE-LUA-RECORDS/
+  │      SOA-EDIT-API absent, every X-* kind writable). Kinds that reach past
+  │      the zone if a member ever gets the grant: ALSO-NOTIFY (server sends
+  │      NOTIFY to any IP:port on demand), the DNSUPDATE family (second write
+  │      path bypassing this proxy entirely, iff dnsupdate=yes), PUBLISH-CDS/
+  │      CDNSKEY/SIGNALING-ZONE (drives DS change at the delegating parent),
+  │      AXFR-SOURCE (picks a server address), TSIG-ALLOW-AXFR (names a
+  │      server-global key), X-* (forgeable by a member if our own tooling
+  │      ever trusts it). Granting members metadata means adding a kind
+  │      allowlist here first. Also: GET .../metadata is unfiltered upstream,
+  │      so it lists kinds the per-kind endpoint refuses to serve
   │    - deny set: configured infra zones removed unconditionally
   │    - admins/static envs keep their YAML-defined environment
   │    - result: ephemeral ProxyConfigEnvironment in a request contextvar;

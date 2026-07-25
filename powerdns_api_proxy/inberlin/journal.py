@@ -71,12 +71,16 @@ def classify(method: str, path: str) -> OpInfo | None:
     server, zone, rest = m.group("server"), m.group("zone"), m.group("rest") or ""
     if zone is None:
         return OpInfo("zone-create", server, None)
-    if "/cryptokeys" in rest:
-        return OpInfo("crypto", server, zone)
-    # Must precede the DELETE branch: without it, deleting one metadata kind
-    # classifies as a zone deletion and its rollback recreates the zone.
+    # Must precede both the cryptokeys arm and the DELETE arm. Against the
+    # DELETE arm: without it, deleting one metadata kind classifies as a zone
+    # deletion, whose rollback recreates the whole zone. Against cryptokeys:
+    # that arm is a substring test, so a metadata kind named "cryptokeys"
+    # (/metadata/cryptokeys) would classify as `crypto` and get its body
+    # suppressed as secret.
     if rest == "/metadata" or rest.startswith("/metadata/"):
         return OpInfo("zone-metadata", server, zone)
+    if rest.startswith("/cryptokeys"):
+        return OpInfo("crypto", server, zone)
     if rest in ("/notify", "/rectify"):
         return OpInfo("other", server, zone)
     if method == "PATCH":
