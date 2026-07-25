@@ -34,8 +34,47 @@ def reload_static_config() -> None:
     load_config.cache_clear()
     reset_settings_cache()
     load_config()
-    load_inberlin_settings()
+    settings = load_inberlin_settings()
+    _apply_to_runtime(settings)
     logger.info("static configuration reloaded")
+
+
+# Baked into objects built at startup, so re-reading the file cannot change
+# them: state_db opens a connection, oidc builds a validator, and the deny lists
+# are canonicalized into the immutable MappingView. Changing any of these needs
+# a restart, and a reload must SAY so rather than look like it worked.
+RESTART_REQUIRED_FIELDS = ("state_db", "oidc", "deny_zones", "deny_zones_exact")
+
+
+def _apply_to_runtime(settings) -> None:
+    """Point the live runtime at the newly loaded settings.
+
+    Without this, a reload updated the module-level caches while every request
+    kept reading `runtime.settings` — the object captured at startup. Narrowing
+    `webui_source_ips` and reloading therefore appeared to work and changed
+    nothing, which is a silent failure of a security control: the act-as
+    credential stayed accepted from the old source. Observed on ans0,
+    2026-07-25 (config said .99, request from .1 still got 200 until restart).
+    """
+    from powerdns_api_proxy.inberlin.runtime import get_runtime
+
+    runtime = get_runtime()
+    if runtime is None or settings is None:
+        # Extension off, or reload ran before startup finished; nothing live to
+        # update and init_runtime() will read the fresh settings itself.
+        return
+
+    stale = [
+        field
+        for field in RESTART_REQUIRED_FIELDS
+        if getattr(runtime.settings, field) != getattr(settings, field)
+    ]
+    runtime.settings = settings
+    if stale:
+        logger.warning(
+            "reload applied, but these settings only take effect after a "
+            f"restart: {', '.join(stale)}"
+        )
 
 
 def install_sighup_handler() -> None:
