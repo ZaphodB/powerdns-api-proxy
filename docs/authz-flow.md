@@ -64,7 +64,12 @@ request
   │      ever trusts it). Granting members metadata means adding a kind
   │      allowlist here first. Also: GET .../metadata is unfiltered upstream,
   │      so it lists kinds the per-kind endpoint refuses to serve
-  │    - deny set: configured infra zones removed unconditionally
+  │    - deny set: configured infra zones removed unconditionally.
+  │      `deny_zones` denies a zone AND everything under it (infra
+  │      namespaces); `deny_zones_exact` denies only the named zone, for
+  │      an apex whose subzones are the product (in-berlin.de: the apex
+  │      must never resolve to a member, but every member zone sits under
+  │      it, so a subtree entry would deny the whole namespace)
   │    - admins/static envs keep their YAML-defined environment
   │    - result: ephemeral ProxyConfigEnvironment in a request contextvar;
   │      patched get_environment_for_token() prefers the contextvar
@@ -73,7 +78,7 @@ request
   │    - zone-ownership resolution for a zone Z:
   │        a. most-specific override grant on Z or ancestor (label-boundary) wins
   │        b. else longest label-suffix owned zone in mapping
-  │        c. deny-set zones resolve to nobody
+  │        c. deny-set zones resolve to nobody (subtree or exact, per above)
   │        (label-boundary = name == zone or name.endswith("." + zone) on
   │         canonicalized names — never raw string suffix)
   │ 6. journal intent (JournalMiddleware, mutating /api/v1 only)

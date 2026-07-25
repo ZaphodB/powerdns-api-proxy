@@ -17,11 +17,7 @@ from powerdns_api_proxy.inberlin.journal import (
     run_journaled,
 )
 from powerdns_api_proxy.inberlin.keys import generate_key
-from powerdns_api_proxy.inberlin.names import (
-    canonical_user,
-    canonical_zone,
-    zone_is_or_under,
-)
+from powerdns_api_proxy.inberlin.names import canonical_user, canonical_zone
 from powerdns_api_proxy.inberlin.rollback import (
     NotRollbackable,
     build_rollback_request,
@@ -402,9 +398,8 @@ async def register_zone(body: RegisterBody):
     zone = canonical_zone(body.zone)
     user = canonical_user(body.user)
     view = rt.mapping.view
-    for denied in view.deny_zones:
-        if zone_is_or_under(zone, denied):
-            raise HTTPException(403, "zone is on the deny list")
+    if view.is_denied(zone):
+        raise HTTPException(403, "zone is on the deny list")
     if view.owner_of(zone) is not None:
         raise HTTPException(409, "zone already owned by a User")
 

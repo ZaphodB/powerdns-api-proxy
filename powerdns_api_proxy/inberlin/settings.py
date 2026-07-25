@@ -36,7 +36,11 @@ class InBerlinSettings(BaseModel):
     enabled: bool = True
     state_db: str = "/var/lib/pdns-api-proxy/state.sqlite"
     oidc: OIDCSettings | None = None
+    # Zone and everything beneath it are denied (infra namespaces).
     deny_zones: list[str] = []
+    # Only the exact zone is denied; subzones stay delegatable. Use this for
+    # an apex that members live underneath, e.g. in-berlin.de.
+    deny_zones_exact: list[str] = []
     # environment name -> roles (admin | exporter | webui | metrics | registrar)
     environment_roles: dict[str, list[str]] = {}
     # required for /proxy/v1/register; absent = registration disabled (501)

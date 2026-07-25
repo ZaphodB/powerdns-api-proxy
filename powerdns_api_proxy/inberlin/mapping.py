@@ -25,6 +25,11 @@ class MappingView:
     zones_by_user: dict[str, frozenset[str]]
     overrides: dict[str, str]  # canonical zone -> canonical user
     deny_zones: tuple[str, ...] = ()
+    # Denied as an exact zone; subzones are unaffected. in-berlin.de is the
+    # driving case: the apex must never resolve to a member, but every member
+    # zone is a subzone of it, so a subtree deny would lock out the entire
+    # namespace the service exists to delegate.
+    deny_zones_exact: tuple[str, ...] = ()
     applied_at: str = ""  # commit timestamp of generation; "" for empty store
 
     def zones_for(self, user: str) -> set[str]:
@@ -34,13 +39,26 @@ class MappingView:
         zones.update(z for z, owner in self.overrides.items() if owner == canonical)
         return zones
 
+    def is_denied(self, zone: str) -> bool:
+        """True if the zone is in the deny set, by subtree or exact match.
+
+        Both sides are canonicalized rather than compared as given: MappingState
+        already stores canonical entries, but a deny list that silently stops
+        matching because a caller wrote `in-berlin.de` instead of
+        `in-berlin.de.` would fail OPEN, and this list exists precisely to be
+        the last word.
+        """
+        z = canonical_zone(zone)
+        if any(zone_is_or_under(z, denied) for denied in self.deny_zones):
+            return True
+        return any(z == canonical_zone(denied) for denied in self.deny_zones_exact)
+
     def owner_of(self, zone: str) -> str | None:
         """Resolution per docs/authz-flow.md §5: deny set, then most-specific
         override on the zone or an ancestor, then longest owned suffix."""
         z = canonical_zone(zone)
-        for denied in self.deny_zones:
-            if zone_is_or_under(z, denied):
-                return None
+        if self.is_denied(z):
+            return None
         best_override: tuple[int, str] | None = None
         for ov_zone, owner in self.overrides.items():
             if zone_is_or_under(z, ov_zone):
@@ -68,10 +86,16 @@ class MappingState:
     """Mutable holder of the current MappingView; writes go through the Store
     with generation CAS, then swap the view reference (atomic for readers)."""
 
-    def __init__(self, store: Store, deny_zones: list[str]):
+    def __init__(
+        self,
+        store: Store,
+        deny_zones: list[str],
+        deny_zones_exact: list[str] | None = None,
+    ):
         self._store = store
         self._deny = tuple(canonical_zone(z) for z in deny_zones)
-        self.view = MappingView(0, {}, {}, self._deny)
+        self._deny_exact = tuple(canonical_zone(z) for z in (deny_zones_exact or []))
+        self.view = MappingView(0, {}, {}, self._deny, self._deny_exact)
         # Serializes every "store mutation/read → view swap" sequence: two
         # interleaved updaters (mapping write vs override reload) could
         # otherwise each await mid-sequence and install a view built from
@@ -106,6 +130,7 @@ class MappingState:
                 canonical_zone(z): canonical_user(user) for z, user in overrides.items()
             },
             deny_zones=self._deny,
+            deny_zones_exact=self._deny_exact,
             applied_at=applied_at,
         )
 

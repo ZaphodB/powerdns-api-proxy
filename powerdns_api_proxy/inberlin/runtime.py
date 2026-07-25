@@ -28,7 +28,9 @@ class Runtime:
     def __init__(self, settings: InBerlinSettings):
         self.settings = settings
         self.store = Store(settings.state_db)
-        self.mapping = MappingState(self.store, settings.deny_zones)
+        self.mapping = MappingState(
+            self.store, settings.deny_zones, settings.deny_zones_exact
+        )
         self.oidc: OIDCValidator | None = (
             OIDCValidator(settings.oidc) if settings.oidc else None
         )

@@ -28,7 +28,7 @@ from powerdns_api_proxy.inberlin.journal import JournalCapture, classify, run_jo
 from powerdns_api_proxy.inberlin.keys import sha512, verify_key
 from powerdns_api_proxy.inberlin.names import canonical_user
 from powerdns_api_proxy.inberlin.runtime import get_runtime
-from powerdns_api_proxy.inberlin.roles import ADMIN, WEBUI
+from powerdns_api_proxy.inberlin.roles import ADMIN, EXPORTER, METRICS, REGISTRAR, WEBUI
 from powerdns_api_proxy.logging import logger
 
 IDENTITY_HEADERS = (
@@ -259,6 +259,23 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 runtime.mapping.view.owner_of(zone_ref) != identity.effective_user
             ):
                 return _error(403, "zone not owned")
+
+        # Service credentials have no business on the PowerDNS surface at all
+        # (docs/api-contract.md: REG is "/proxy/v1/register ONLY", EXP is
+        # mapping-only, MET is metrics-only). Until now that was enforced only
+        # by giving those environments an empty zone list, so the registrar
+        # token answered 200 + [] on /api/v1 instead of 403 — and a single stray
+        # zone grant in the deployment config would have silently turned a
+        # create-only credential into a DNS-editing one. Admin keeps full
+        # access; plain upstream environments (no inberlin role at all) are
+        # untouched, which is what keeps the extension inert elsewhere.
+        if (
+            identity.kind == "static"
+            and not identity.is_admin
+            and {REGISTRAR, EXPORTER, METRICS} & set(identity.roles)
+            and path.startswith("/api/v1")
+        ):
+            return _error(403, "credential not allowed on the PowerDNS API")
 
         token_id = identity.actor
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):

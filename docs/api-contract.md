@@ -17,7 +17,10 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
 - **EXP** — static `mapping-exporter` env (capability: mapping endpoints only)
 - **REG** — static registrar env (capability: `/proxy/v1/register` ONLY —
   create-only by construction: no `/api/v1`, no reads, no mutation of existing
-  zones; pdns's unconditional 409 on duplicate zone create is the backstop)
+  zones; pdns's unconditional 409 on duplicate zone create is the backstop).
+  Enforced by an explicit credential gate: REG, EXP and MET are refused on
+  `/api/v1` with `403 credential not allowed on the PowerDNS API`, rather
+  than relying on the environment having an empty zone list
 - **MET** — static metrics env
 
 Impersonation: `X-Impersonate-Teilnehmer` — ADM only, journaled with both

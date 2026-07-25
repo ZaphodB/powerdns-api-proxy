@@ -481,8 +481,12 @@ def test_register_refuses_existing_and_denied(client, fake_pdns):
 
 
 def test_registrar_token_is_create_only(client):
-    # no /api/v1 reads or writes with the registrar credential
-    assert client.get(ZONES_PATH, headers=REG).json() == []
+    # no /api/v1 reads or writes with the registrar credential. This line used
+    # to assert `200 []` — the empty zone list of the registrar environment —
+    # which contradicted both the comment above it and the contract. The
+    # credential is now refused on the PowerDNS surface outright; see
+    # tests/unit/inberlin/test_service_credential_scope.py.
+    assert client.get(ZONES_PATH, headers=REG).status_code == 403
     r = client.patch(f"{ZONES_PATH}/kunde.example.", headers=REG, json=PATCH_BODY)
     assert r.status_code in (401, 403)
     r = client.delete(f"{ZONES_PATH}/kunde.example.", headers=REG)
