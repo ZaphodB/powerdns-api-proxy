@@ -615,7 +615,15 @@ async def admin_reload():
     from powerdns_api_proxy.inberlin.reload import reload_static_config
 
     # sync file read + YAML parse — keep it off the event loop
-    reloaded = await asyncio.to_thread(reload_static_config)
+    try:
+        reloaded = await asyncio.to_thread(reload_static_config)
+    except Exception as e:
+        # A rejected or unparseable config is the operator's file, not a server
+        # fault, and the reason belongs in the response rather than only in the
+        # log. Nothing was published (see reload.py's commit point), so the
+        # running config is unchanged.
+        logger.warning(f"reload rejected: {e}")
+        raise HTTPException(400, f"reload rejected, config unchanged: {e}")
     if not reloaded:
         # Another reload (e.g. a SIGHUP) held the lock; ours did nothing, and
         # saying "reloaded" would be exactly the sort of false success this

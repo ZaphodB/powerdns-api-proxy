@@ -13,47 +13,15 @@ and matches nothing, protecting nothing while looking like protection.
 import pytest
 from pydantic import ValidationError
 
-import powerdns_api_proxy.inberlin.reload as reload_mod
-from powerdns_api_proxy.inberlin.settings import (
-    InBerlinSettings,
-    load_inberlin_settings,
-)
-from tests.unit.inberlin.conftest import make_config
-
-CONFIG_YAML = """
-pdns_api_url: http://127.0.0.1:8081
-pdns_api_token: upstream-token
-environments: []
-inberlin:
-  state_db: /tmp/hy3-test.sqlite
-  webui_source_ips: ["192.168.254.9"]
-  environment_roles:
-    nonexistent-env: [registrar]
-"""
+from powerdns_api_proxy.inberlin.settings import InBerlinSettings
 
 
-def test_refused_reload_leaves_the_settings_cache_untouched(monkeypatch, tmp_path):
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text(CONFIG_YAML)
-    monkeypatch.setenv("PROXY_CONFIG_PATH", str(config_file))
-    monkeypatch.setattr(reload_mod, "load_config", lambda *a, **k: make_config())
-
-    live = InBerlinSettings(webui_source_ips=["10.0.0.1"])
-    reset_called = []
-    monkeypatch.setattr(
-        reload_mod, "reset_settings_cache", lambda: reset_called.append(True)
-    )
-    monkeypatch.setattr(reload_mod, "load_inberlin_settings", load_inberlin_settings)
-    applied = []
-    monkeypatch.setattr(reload_mod, "_apply_to_runtime", applied.append)
-
-    with pytest.raises(ValueError) as excinfo:
-        reload_mod._reload_locked()
-
-    assert "refusing reload" in str(excinfo.value)
-    assert reset_called == [], "the live settings cache must not be reset"
-    assert applied == [], "nothing may go live from a refused reload"
-    assert live.webui_source_ips == ["10.0.0.1"]
+# The "refused reload publishes nothing" property is asserted in
+# test_reload_is_all_or_nothing.py. The version that lived here mocked
+# load_config, and that mock is exactly why this round's fix looked complete
+# while the live environment map was still being published: the real loader is
+# lru_cache(maxsize=1), and a mocked one cannot exhibit the eviction that caused
+# the bug. Do not reintroduce a mocked variant.
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "\t"])

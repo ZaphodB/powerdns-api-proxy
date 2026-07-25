@@ -64,10 +64,18 @@ def _reload_locked() -> None:
     if not path:
         raise ValueError("PROXY_CONFIG_PATH not set")
 
-    # Parse-check against a fresh path (cache-miss) without disturbing the
-    # currently cached objects. Raises on a broken file — caches stay warm.
-    candidate = load_config(Path(path))
+    # Read the LIVE config first, then parse the candidate through __wrapped__.
+    #
+    # load_config is lru_cache(maxsize=1), so calling it with an explicit path
+    # evicts the no-arg entry, and the next no-arg call is a cache MISS that
+    # re-reads the new file and publishes it as the live config. Doing that here
+    # meant the environment map went live before anything had validated it: a
+    # reload refused below still swapped tokens and grants, the fail-closed
+    # ordering was inverted, and `previous` was never actually the old config so
+    # the upstream-credential warning could never fire. __wrapped__ bypasses the
+    # cache entirely, so nothing is published until the commit point below.
     previous = load_config()
+    candidate = load_config.__wrapped__(Path(path))
 
     # The connector holding these was built at import and is never rebuilt, so
     # a rotated upstream credential would look applied and would not be.
@@ -81,20 +89,8 @@ def _reload_locked() -> None:
             "until the service is restarted"
         )
 
-    # New file is valid. Settings go live BEFORE the environment map is swapped,
-    # because the two are not swapped atomically and the ordering decides which
-    # way the gap fails. Settings first means a reload that simultaneously
-    # rotates a token and narrows webui_source_ips has the tighter source-IP
-    # rule already in force while the new token becomes valid; the reverse order
-    # leaves a window where the new token is accepted from the old, now
-    # forbidden, source address. The mirror-image case (widening source IPs while
-    # rotating a token) is briefly permissive instead — unavoidable without one
-    # atomic snapshot, which is why the deployment restarts rather than reloads.
-    # Validate the candidate settings WITHOUT touching the cache. __wrapped__
-    # bypasses the lru_cache deliberately: resetting the cache first and then
-    # refusing the reload would leave the new settings cached while the runtime
-    # kept the old ones — a "refused" reload that still half-applied, which is
-    # precisely the contract this function promises not to break.
+    # Same treatment for the settings half: parse the candidate without touching
+    # the cache, so a refusal below leaves the live settings exactly as they are.
     candidate_settings = load_inberlin_settings.__wrapped__(Path(path))
 
     # Same cross-check init_runtime() does, against the CANDIDATE environments
@@ -108,7 +104,17 @@ def _reload_locked() -> None:
         if problem:
             raise ValueError(f"refusing reload: {problem}")
 
-    # Candidate is good on every axis we can check — now mutate live state.
+    # COMMIT POINT. Nothing above this line has published anything, so every
+    # failure path so far leaves the process exactly as it was.
+    #
+    # Settings go live BEFORE the environment map, because the two are not
+    # swapped atomically and the ordering decides which way the gap fails.
+    # Settings first means a reload that simultaneously rotates a token and
+    # narrows webui_source_ips has the tighter source-IP rule already in force
+    # when the new token becomes valid. The mirror-image case (widening source
+    # IPs while rotating a token) is briefly permissive instead — unavoidable
+    # without one atomic snapshot, which is why the deployment restarts rather
+    # than reloads.
     reset_settings_cache()
     settings = load_inberlin_settings()
     _apply_to_runtime(settings)
