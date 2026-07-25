@@ -8,6 +8,15 @@ the writer. busy_timeout 5000. One uvicorn worker is an operational
 requirement (docs/authz-flow.md).
 """
 
+# Identity below is imported under TYPE_CHECKING only, yet appears as an
+# annotation on runtime signatures. Python 3.14 defers annotation evaluation
+# (PEP 649) so the module imports fine there, but on 3.13 and earlier the
+# annotation is evaluated when the function is defined and raises NameError at
+# import time. Debian 13 (ans0) ships 3.13, so this import is what makes the
+# module loadable on the deployment target. Guarded by
+# tests/unit/inberlin/test_deferred_annotations.py.
+from __future__ import annotations
+
 import asyncio
 import json
 import sqlite3
