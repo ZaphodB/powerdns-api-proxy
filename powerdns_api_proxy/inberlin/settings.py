@@ -7,8 +7,10 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from yaml import safe_load
+
+from powerdns_api_proxy.inberlin.roles import KNOWN_ROLES as KNOWN
 
 
 class OIDCSettings(BaseModel):
@@ -43,6 +45,29 @@ class InBerlinSettings(BaseModel):
     deny_zones_exact: list[str] = []
     # environment name -> roles (admin | exporter | webui | metrics | registrar)
     environment_roles: dict[str, list[str]] = {}
+
+    @field_validator("environment_roles")
+    @classmethod
+    def _known_roles_only(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Reject unknown role names instead of silently ignoring them.
+
+        Every gate in this codebase is a membership test against these strings,
+        so a typo does not fail loudly — it removes a restriction. Writing
+        `registrar: [regisrar]` leaves that environment with no recognised role,
+        which means the /api/v1 service-credential gate stops applying and the
+        token is accepted on the PowerDNS surface again. Fail at startup, where
+        it is visible, rather than at authorization time, where it is not.
+        """
+        unknown = sorted(
+            {role for roles in value.values() for role in roles if role not in KNOWN}
+        )
+        if unknown:
+            raise ValueError(
+                f"unknown role(s) in environment_roles: {unknown}; "
+                f"valid roles are {sorted(KNOWN)}"
+            )
+        return value
+
     # required for /proxy/v1/register; absent = registration disabled (501)
     registration: RegistrationSettings | None = None
     journal_retention_days: int = 730

@@ -197,7 +197,11 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 identity = Identity(kind="tn-key", actor=user, effective_user=user)
                 environment = environment_for_user(user, runtime.mapping.view)
         else:
-            if runtime.oidc is None or runtime.settings.oidc is None:
+            # Bind the settings object once. runtime.settings is now replaced on
+            # reload, so re-reading it after the `await` below could observe a
+            # config where the oidc block has been removed and dereference None.
+            oidc_settings = runtime.settings.oidc
+            if runtime.oidc is None or oidc_settings is None:
                 return _error(401, "OIDC not configured")
             if bearer is None:
                 return _error(401, "Unauthorized")
@@ -210,7 +214,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 return _error(401, "Unauthorized")
             is_admin = runtime.oidc.is_admin(claims)
             sub = claims["sub"]
-            username = claims.get(runtime.settings.oidc.username_claim, sub)
+            username = claims.get(oidc_settings.username_claim, sub)
             if x_tn:
                 return _error(403, "X-Teilnehmer not allowed with OIDC")
             if x_imp:

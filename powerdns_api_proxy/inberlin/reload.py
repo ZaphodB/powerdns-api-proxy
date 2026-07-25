@@ -30,20 +30,36 @@ def reload_static_config() -> None:
     # currently cached objects. Raises on a broken file — caches stay warm.
     load_config(Path(path))
 
-    # New file is valid: now swap the caches atomically.
-    load_config.cache_clear()
+    # New file is valid. Settings go live BEFORE the environment map is swapped,
+    # because the two are not swapped atomically and the ordering decides which
+    # way the gap fails. Settings first means a reload that simultaneously
+    # rotates a token and narrows webui_source_ips has the tighter source-IP
+    # rule already in force while the new token becomes valid; the reverse order
+    # leaves a window where the new token is accepted from the old, now
+    # forbidden, source address.
     reset_settings_cache()
-    load_config()
     settings = load_inberlin_settings()
     _apply_to_runtime(settings)
+
+    load_config.cache_clear()
+    load_config()
     logger.info("static configuration reloaded")
 
 
 # Baked into objects built at startup, so re-reading the file cannot change
-# them: state_db opens a connection, oidc builds a validator, and the deny lists
-# are canonicalized into the immutable MappingView. Changing any of these needs
-# a restart, and a reload must SAY so rather than look like it worked.
-RESTART_REQUIRED_FIELDS = ("state_db", "oidc", "deny_zones", "deny_zones_exact")
+# them: state_db opens a connection, oidc builds a validator, the deny lists are
+# canonicalized into the immutable MappingView, and the rate limiter is
+# constructed once and cached on app.state. Changing any of these needs a
+# restart, and a reload must SAY so rather than look like it worked.
+RESTART_REQUIRED_FIELDS = (
+    "state_db",
+    "oidc",
+    "deny_zones",
+    "deny_zones_exact",
+    "rate_limit_auth_failures_per_minute",
+    "rate_limit_mutations_per_minute",
+    "rate_limit_webui_global_mutations_per_minute",
+)
 
 
 def _apply_to_runtime(settings) -> None:
@@ -59,9 +75,21 @@ def _apply_to_runtime(settings) -> None:
     from powerdns_api_proxy.inberlin.runtime import get_runtime
 
     runtime = get_runtime()
-    if runtime is None or settings is None:
-        # Extension off, or reload ran before startup finished; nothing live to
-        # update and init_runtime() will read the fresh settings itself.
+    if runtime is None:
+        # Reload landed before startup finished, or the extension was never on;
+        # init_runtime() will read the fresh settings itself.
+        return
+
+    if settings is None:
+        # The `inberlin:` block was removed or set to enabled:false while the
+        # extension is LIVE. Nothing here can tear the runtime down safely, so
+        # the whole multi-tenant layer stays in force — say so loudly rather
+        # than let the operator believe the reload disabled it.
+        logger.warning(
+            "reload found no usable inberlin settings (block removed or "
+            "disabled), but the extension is already running: it stays ACTIVE "
+            "with the previous settings until the service is restarted"
+        )
         return
 
     stale = [

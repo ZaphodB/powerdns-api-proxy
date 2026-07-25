@@ -136,7 +136,14 @@ async def get_mapping():
 async def get_mapping_self():
     rt, identity = _runtime(), _identity()
     user = _require_user(identity)
-    return {"user": user, "zones": sorted(rt.mapping.view.zones_for(user))}
+    view = rt.mapping.view
+    # Resolve through owner_of rather than returning the raw mapping entries, so
+    # this agrees with what the member can actually do: a denied zone, or one an
+    # override reassigned, is not theirs. environment_for_user() already filters
+    # the same way; without this, a UI built on /mapping/self would advertise a
+    # zone whose every operation 403s.
+    zones = sorted(z for z in view.zones_for(user) if view.owner_of(z) == user)
+    return {"user": user, "zones": zones}
 
 
 # -- overrides --------------------------------------------------------------

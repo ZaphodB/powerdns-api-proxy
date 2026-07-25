@@ -57,6 +57,33 @@ def test_restart_required_fields_are_reported(monkeypatch, caplog):
     assert "restart" in caplog.text
 
 
+def test_rate_limits_are_reported_as_restart_required(monkeypatch, caplog):
+    """The limiter is built once and cached on app.state, so these are baked in."""
+    runtime = _FakeRuntime(_settings())
+    monkeypatch.setattr(
+        "powerdns_api_proxy.inberlin.runtime.get_runtime", lambda: runtime
+    )
+
+    with caplog.at_level("WARNING"):
+        reload_mod._apply_to_runtime(_settings(rate_limit_mutations_per_minute=5))
+
+    assert "rate_limit_mutations_per_minute" in caplog.text
+    assert "restart" in caplog.text
+
+
+def test_removing_the_block_while_live_warns_loudly(monkeypatch, caplog):
+    """`enabled: false` cannot tear down a running runtime — say so."""
+    runtime = _FakeRuntime(_settings())
+    monkeypatch.setattr(
+        "powerdns_api_proxy.inberlin.runtime.get_runtime", lambda: runtime
+    )
+
+    with caplog.at_level("WARNING"):
+        reload_mod._apply_to_runtime(None)
+
+    assert "ACTIVE" in caplog.text
+
+
 def test_hot_swappable_change_warns_about_nothing(monkeypatch, caplog):
     runtime = _FakeRuntime(_settings())
     monkeypatch.setattr(
