@@ -6,8 +6,11 @@ becomes a zone entry with admin=True, subzones=True, cryptokeys=True and full
 record access; override grants included; deny-set zones excluded by owner
 resolution. Owning a zone means full control over it and its descendants —
 records, subzone create, zone delete, DNSSEC keys (owner decision 2026-07-25,
-docs/authz-flow.md §4); only unrelated apexes are denied. Admin OIDC
-identities get a wildcard admin environment.
+docs/authz-flow.md §4); only unrelated apexes are denied. Zone METADATA is the
+one deliberate exception: members do not get it (ALLOW-AXFR-FROM,
+ENABLE-LUA-RECORDS and friends are IN-Berlin infrastructure knobs, not zone
+content) — pending an owner decision, add metadata=True below to reverse.
+Admin OIDC identities get a wildcard admin environment, metadata included.
 
 The synthesized environment is placed in the current_environment contextvar;
 the patched upstream get_environment_for_token() prefers it over the static
@@ -57,6 +60,7 @@ def environment_for_admin(identity: Identity) -> ProxyConfigEnvironment:
         ],
         global_search=True,
         global_cryptokeys=True,
+        global_metadata=True,
         global_tsigkeys=True,
         global_config=True,
         global_statistics=True,

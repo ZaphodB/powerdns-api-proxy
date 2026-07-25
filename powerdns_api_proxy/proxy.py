@@ -18,6 +18,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from powerdns_api_proxy.config import (
     check_pdns_search_allowed,
     check_pdns_cryptokeys_allowed,
+    check_pdns_metadata_allowed,
+    check_pdns_metadata_write_allowed,
     check_pdns_tsigkeys_allowed,
     check_pdns_config_allowed,
     check_pdns_statistics_allowed,
@@ -31,6 +33,7 @@ from powerdns_api_proxy.config import (
     load_config,
 )
 from powerdns_api_proxy.exceptions import (
+    MetadataNotAllowedException,
     RessourceNotAllowedException,
     SearchNotAllowedException,
     ZoneAdminNotAllowedException,
@@ -499,6 +502,131 @@ async def zone_rectification(
     status_code = pdns_response.raise_for_error()
 
     # PUT operations often return 204 No Content
+    if status_code == HTTPStatus.NO_CONTENT:
+        return Response(status_code=HTTPStatus.NO_CONTENT)
+
+    return JSONResponse(content=pdns_response.data, status_code=status_code)
+
+
+# Zone metadata (/zones/{zone_id}/metadata...). Note that the handlers above
+# named `get_zone_metadata` / `update_zone_metadata` are NOT these: they serve
+# /zones/{zone_id} itself, i.e. the zone object. Metadata proper is gated by
+# its own grant -- see check_pdns_metadata_allowed.
+@router_pdns.get("/servers/{server_id}/zones/{zone_id}/metadata")
+async def list_zone_metadata(server_id: str, zone_id: str, X_API_Key: str = Header()):
+    """
+    Get all the metadata associated with the zone.
+
+    <https://doc.powerdns.com/authoritative/http-api/zonemetadata.html#get--servers-server_id-zones-zone_id-metadata>
+    """
+    environment = get_environment_for_token(config, X_API_Key)
+    if not check_pdns_metadata_allowed(environment, zone_id):
+        logger.info(
+            f"Metadata of zone {zone_id} not allowed for environment {environment.name}"
+        )
+        raise MetadataNotAllowedException()
+    resp = await pdns.get(f"/api/v1/servers/{server_id}/zones/{zone_id}/metadata")
+    pdns_response = await handle_pdns_response(resp)
+    status_code = pdns_response.raise_for_error()
+    return JSONResponse(content=pdns_response.data, status_code=status_code)
+
+
+@router_pdns.post("/servers/{server_id}/zones/{zone_id}/metadata")
+async def create_zone_metadata(
+    request: Request, server_id: str, zone_id: str, X_API_Key: str = Header()
+):
+    """
+    Creates a set of metadata entries.
+
+    <https://doc.powerdns.com/authoritative/http-api/zonemetadata.html#post--servers-server_id-zones-zone_id-metadata>
+    """
+    environment = get_environment_for_token(config, X_API_Key)
+    if not check_pdns_metadata_write_allowed(environment, zone_id):
+        logger.info(
+            f"Metadata write on zone {zone_id} not allowed for environment {environment.name}"
+        )
+        raise MetadataNotAllowedException()
+    resp = await pdns.post(
+        f"/api/v1/servers/{server_id}/zones/{zone_id}/metadata",
+        payload=await request.json(),
+    )
+    pdns_response = await handle_pdns_response(resp)
+    status_code = pdns_response.raise_for_error()
+    return JSONResponse(content=pdns_response.data, status_code=status_code)
+
+
+@router_pdns.get("/servers/{server_id}/zones/{zone_id}/metadata/{metadata_kind}")
+async def fetch_zone_metadata_kind(
+    server_id: str, zone_id: str, metadata_kind: str, X_API_Key: str = Header()
+):
+    """
+    Get the content of a single kind of domain metadata as a MetaData object.
+
+    <https://doc.powerdns.com/authoritative/http-api/zonemetadata.html#get--servers-server_id-zones-zone_id-metadata-metadata_kind>
+    """
+    environment = get_environment_for_token(config, X_API_Key)
+    if not check_pdns_metadata_allowed(environment, zone_id):
+        logger.info(
+            f"Metadata of zone {zone_id} not allowed for environment {environment.name}"
+        )
+        raise MetadataNotAllowedException()
+    resp = await pdns.get(
+        f"/api/v1/servers/{server_id}/zones/{zone_id}/metadata/{metadata_kind}"
+    )
+    pdns_response = await handle_pdns_response(resp)
+    status_code = pdns_response.raise_for_error()
+    return JSONResponse(content=pdns_response.data, status_code=status_code)
+
+
+@router_pdns.put("/servers/{server_id}/zones/{zone_id}/metadata/{metadata_kind}")
+async def update_zone_metadata_kind(
+    request: Request,
+    server_id: str,
+    zone_id: str,
+    metadata_kind: str,
+    X_API_Key: str = Header(),
+):
+    """
+    Replace the content of a single kind of domain metadata.
+
+    <https://doc.powerdns.com/authoritative/http-api/zonemetadata.html#put--servers-server_id-zones-zone_id-metadata-metadata_kind>
+    """
+    environment = get_environment_for_token(config, X_API_Key)
+    if not check_pdns_metadata_write_allowed(environment, zone_id):
+        logger.info(
+            f"Metadata write on zone {zone_id} not allowed for environment {environment.name}"
+        )
+        raise MetadataNotAllowedException()
+    resp = await pdns.put(
+        f"/api/v1/servers/{server_id}/zones/{zone_id}/metadata/{metadata_kind}",
+        payload=await request.json(),
+    )
+    pdns_response = await handle_pdns_response(resp)
+    status_code = pdns_response.raise_for_error()
+    return JSONResponse(content=pdns_response.data, status_code=status_code)
+
+
+@router_pdns.delete("/servers/{server_id}/zones/{zone_id}/metadata/{metadata_kind}")
+async def delete_zone_metadata_kind(
+    server_id: str, zone_id: str, metadata_kind: str, X_API_Key: str = Header()
+):
+    """
+    Delete all items of a single kind of domain metadata.
+
+    <https://doc.powerdns.com/authoritative/http-api/zonemetadata.html#delete--servers-server_id-zones-zone_id-metadata-metadata_kind>
+    """
+    environment = get_environment_for_token(config, X_API_Key)
+    if not check_pdns_metadata_write_allowed(environment, zone_id):
+        logger.info(
+            f"Metadata write on zone {zone_id} not allowed for environment {environment.name}"
+        )
+        raise MetadataNotAllowedException()
+    resp = await pdns.delete(
+        f"/api/v1/servers/{server_id}/zones/{zone_id}/metadata/{metadata_kind}"
+    )
+    pdns_response = await handle_pdns_response(resp)
+    status_code = pdns_response.raise_for_error()
+
     if status_code == HTTPStatus.NO_CONTENT:
         return Response(status_code=HTTPStatus.NO_CONTENT)
 

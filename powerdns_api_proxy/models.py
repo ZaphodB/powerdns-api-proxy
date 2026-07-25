@@ -27,6 +27,7 @@ class ProxyConfigZone(BaseModel):
     `subzones` sets the same permissions on all subzones.
     `all_records` will be set to `True` if no `records` are defined.
     `cryptokeys` enables management of DNSSEC.
+    `metadata` enables reading and writing zone metadata.
     `read_only` controls write permissions for this specific zone.
     """
 
@@ -41,6 +42,7 @@ class ProxyConfigZone(BaseModel):
     all_records: bool = False
     read_only: bool = False
     cryptokeys: bool = False
+    metadata: bool = False
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -59,6 +61,7 @@ class ProxyConfigEnvironment(BaseModel):
     global_read_only: bool = False
     global_search: bool = False
     global_cryptokeys: bool = False
+    global_metadata: bool = False
     global_tsigkeys: bool = False
     global_config: bool = False
     global_statistics: bool = False

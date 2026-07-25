@@ -254,6 +254,28 @@ environments:
           cryptokeys: true
 ```
 
+#### Zone metadata
+
+Global or zone-specific access to
+[zone metadata](https://doc.powerdns.com/authoritative/http-api/zonemetadata.html)
+can be enabled. It is off by default and not implied by a zone grant: metadata
+carries zone-level machinery (`ALLOW-AXFR-FROM`, `ENABLE-LUA-RECORDS`,
+`SOA-EDIT`) that record editing has no business reaching.
+
+The grant covers reads and writes; writes are additionally refused when the
+environment is `global_read_only` or the zone is `read_only`.
+
+```yaml
+...
+environments:
+    - name: "Test1"
+      global_metadata: true
+    - name: example.com
+      zones:
+        - name: "example.com"
+          metadata: true
+```
+
 #### Global Config
 
 Global configuration access can be defined under an `environment`.

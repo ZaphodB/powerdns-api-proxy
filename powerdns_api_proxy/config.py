@@ -206,6 +206,40 @@ def check_acme_record_allowed(zone: ProxyConfigZone, rrset: RRSET) -> bool:
     return False
 
 
+def check_pdns_metadata_allowed(environment: ProxyConfigEnvironment, zone: str) -> bool:
+    """Read access to a zone's metadata. Separate from the zone grant on
+    purpose: metadata carries zone-level machinery (ALLOW-AXFR-FROM,
+    ENABLE-LUA-RECORDS, SOA-EDIT) that a plain record-editing grant has no
+    business exposing, so it is opt-in per zone or per environment."""
+    if environment.global_metadata:
+        return True
+
+    try:
+        return environment.get_zone_if_allowed(zone).metadata
+    except ZoneNotAllowedException:
+        pass
+
+    return False
+
+
+def check_pdns_metadata_write_allowed(
+    environment: ProxyConfigEnvironment, zone: str
+) -> bool:
+    """Metadata mutation: the read grant, minus every read-only marker."""
+    if environment.global_read_only:
+        return False
+
+    if not check_pdns_metadata_allowed(environment, zone):
+        return False
+
+    try:
+        return not environment.get_zone_if_allowed(zone).read_only
+    except ZoneNotAllowedException:
+        # Reaching here means global_metadata carried the read grant; there
+        # is no zone entry that could mark it read-only.
+        return True
+
+
 def check_pdns_cryptokeys_allowed(
     environment: ProxyConfigEnvironment, zone: str
 ) -> bool:

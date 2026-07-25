@@ -125,6 +125,8 @@ get_routes = [
     "/api/v1/servers/localhost/statistics",
     "/api/v1/servers/localhost/zones",
     "/api/v1/servers/localhost/zones/test.example.com.",
+    "/api/v1/servers/localhost/zones/test.example.com./metadata",
+    "/api/v1/servers/localhost/zones/test.example.com./metadata/ALLOW-AXFR-FROM",
     "/api/v1/servers/localhost/search-data?q='test.example.com.'",
 ]
 
@@ -139,7 +141,10 @@ def test_api_get_missing_token(path, fixture_patch_dummy_config, fixture_patch_p
     _token_missing_request(client, "GET", path)
 
 
-post_routes = ["/api/v1/servers/localhost/zones"]
+post_routes = [
+    "/api/v1/servers/localhost/zones",
+    "/api/v1/servers/localhost/zones/test-zone.example.com./metadata",
+]
 
 
 @pytest.mark.parametrize("path", post_routes)
@@ -156,6 +161,7 @@ put_routes = [
     "/api/v1/servers/localhost/zones/test-zone.example.com.",
     "/api/v1/servers/localhost/zones/test-zone.example.com./notify",
     "/api/v1/servers/localhost/zones/test-zone.example.com./rectify",
+    "/api/v1/servers/localhost/zones/test-zone.example.com./metadata/SOA-EDIT",
 ]
 
 
@@ -182,7 +188,10 @@ def test_api_patch_missing_token(path, fixture_patch_dummy_config, fixture_patch
     _token_missing_request(client, "PATCH", path)
 
 
-delete_routes = ["/api/v1/servers/localhost/zones/test-zone.example.com."]
+delete_routes = [
+    "/api/v1/servers/localhost/zones/test-zone.example.com.",
+    "/api/v1/servers/localhost/zones/test-zone.example.com./metadata/SOA-EDIT",
+]
 
 
 @pytest.mark.parametrize("path", delete_routes)

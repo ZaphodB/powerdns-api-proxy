@@ -8,6 +8,8 @@ from powerdns_api_proxy.config import (
     check_acme_record_allowed,
     check_pdns_search_allowed,
     check_pdns_cryptokeys_allowed,
+    check_pdns_metadata_allowed,
+    check_pdns_metadata_write_allowed,
     check_pdns_tsigkeys_allowed,
     check_pdns_config_allowed,
     check_pdns_statistics_allowed,
@@ -672,6 +674,62 @@ def test_cryptokeys_allowed_global():
     environment.global_cryptokeys = True
     assert check_pdns_cryptokeys_allowed(environment, "test") is True
     assert check_pdns_cryptokeys_allowed(environment, "test.example.com.") is True
+
+
+def test_metadata_not_allowed():
+    environment = dummy_proxy_environment
+    assert check_pdns_metadata_allowed(environment, "test") is False
+    assert check_pdns_metadata_allowed(environment, "test.example.com.") is False
+
+
+def test_metadata_allowed_zone_only():
+    environment = deepcopy(dummy_proxy_environment)
+    environment.zones[0].metadata = True
+    assert check_pdns_metadata_allowed(environment, "test") is False
+    assert check_pdns_metadata_allowed(environment, "test.example.com.") is True
+
+
+def test_metadata_allowed_global():
+    environment = deepcopy(dummy_proxy_environment)
+    environment.global_metadata = True
+    assert check_pdns_metadata_allowed(environment, "test") is True
+    assert check_pdns_metadata_allowed(environment, "test.example.com.") is True
+
+
+def test_metadata_write_needs_the_read_grant():
+    environment = deepcopy(dummy_proxy_environment)
+    assert check_pdns_metadata_write_allowed(environment, "test.example.com.") is False
+
+
+def test_metadata_write_allowed_with_zone_grant():
+    environment = deepcopy(dummy_proxy_environment)
+    environment.zones[0].metadata = True
+    assert check_pdns_metadata_write_allowed(environment, "test.example.com.") is True
+
+
+def test_metadata_write_denied_on_read_only_zone():
+    environment = deepcopy(dummy_proxy_environment)
+    environment.zones[0].metadata = True
+    environment.zones[0].read_only = True
+    assert check_pdns_metadata_allowed(environment, "test.example.com.") is True
+    assert check_pdns_metadata_write_allowed(environment, "test.example.com.") is False
+
+
+def test_metadata_write_denied_for_global_read_only_environment():
+    environment = deepcopy(dummy_proxy_environment)
+    environment.global_metadata = True
+    environment.global_read_only = True
+    assert check_pdns_metadata_allowed(environment, "any.example.com.") is True
+    assert check_pdns_metadata_write_allowed(environment, "any.example.com.") is False
+
+
+def test_metadata_write_allowed_globally_without_zone_entry():
+    environment = deepcopy(dummy_proxy_environment)
+    environment.global_metadata = True
+    assert (
+        check_pdns_metadata_write_allowed(environment, "not-listed.example.org.")
+        is True
+    )
 
 
 def test_tsigkeys_not_allowed():

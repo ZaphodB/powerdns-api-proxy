@@ -72,7 +72,10 @@ PowerDNS-style body `{"error": "<detail>"}`:
 ## `/api/v1` compatibility matrix
 
 Forwarded and covered by tests: servers, zones CRUD, RRset PATCH, notify, rectify,
-search-data, cryptokeys, tsigkeys (per upstream v1.11.1 surface). Proxy additions:
+search-data, cryptokeys, tsigkeys (per upstream v1.11.1 surface), plus zone
+metadata (`/zones/<z>/metadata[/<kind>]`), which upstream does not route at all.
+Metadata needs its own grant (`global_metadata`, or `metadata: true` on the zone)
+and is journaled as `zone-metadata`, not rollbackable. Proxy additions:
 authz may `403` requests upstream would accept; mutating requests may `503`
 (journal fail-closed). Headers: proxy strips `X-Teilnehmer`,
 `X-Impersonate-Teilnehmer`, `X-Webui-User`, `Authorization` before forwarding;

@@ -47,6 +47,10 @@ request
   │      owning a zone = full control over it and its descendants (records,
   │      subzone create, zone delete, DNSSEC keys) — no gatekeeping
   │      (owner decision 2026-07-25; supersedes the earlier subzones-only grant)
+  │    - EXCEPT zone metadata: not granted to members (no metadata=True), it is
+  │      an infra knob (ALLOW-AXFR-FROM, ENABLE-LUA-RECORDS); admins get
+  │      global_metadata=True. Open decision — flip in authz.py if members
+  │      should own it too
   │    - deny set: configured infra zones removed unconditionally
   │    - admins/static envs keep their YAML-defined environment
   │    - result: ephemeral ProxyConfigEnvironment in a request contextvar;

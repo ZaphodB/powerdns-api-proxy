@@ -48,6 +48,11 @@ OPERATIONS: dict[str, OpSpec] = {
     "zone-create": OpSpec(recreate=True),
     "zone-delete": OpSpec(pre_get=True, restore_from_before=True),
     "zone-meta": OpSpec(pre_get=True),
+    # Zone metadata (/zones/<z>/metadata...). Journaled but not rollbackable:
+    # the before-state the journal captures is zone-shaped, and a metadata
+    # inverse would need the prior kind values. build_rollback_request()
+    # raises NotRollbackable for it, which is the honest answer.
+    "zone-metadata": OpSpec(),
     "crypto": OpSpec(secret=True),
     "tsig": OpSpec(secret=True),
     "other": OpSpec(),
@@ -68,6 +73,10 @@ def classify(method: str, path: str) -> OpInfo | None:
         return OpInfo("zone-create", server, None)
     if "/cryptokeys" in rest:
         return OpInfo("crypto", server, zone)
+    # Must precede the DELETE branch: without it, deleting one metadata kind
+    # classifies as a zone deletion and its rollback recreates the zone.
+    if rest == "/metadata" or rest.startswith("/metadata/"):
+        return OpInfo("zone-metadata", server, zone)
     if rest in ("/notify", "/rectify"):
         return OpInfo("other", server, zone)
     if method == "PATCH":

@@ -13,6 +13,12 @@ class ZoneAdminNotAllowedException(HTTPException):
         self.detail = "Not Zone admin"
 
 
+class MetadataNotAllowedException(HTTPException):
+    def __init__(self):
+        self.status_code = 403
+        self.detail = "Zone metadata not allowed"
+
+
 class RecordNotAllowedException(HTTPException):
     def __init__(self):
         self.status_code = 403
