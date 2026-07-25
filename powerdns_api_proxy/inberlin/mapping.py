@@ -179,8 +179,11 @@ class MappingState:
             canonical_user(user): {canonical_zone(z) for z in zones}
             for user, zones in mapping.items()
         }
-        _reject_duplicate_owners(normalized)
         async with self._mutation_lock:
+            # Inside the lock, like the PATCH path: the generation CAS already
+            # makes an interleaved write impossible, but keeping the check out
+            # here made that a property of the CAS rather than of this function.
+            _reject_duplicate_owners(normalized)
             new_gen, applied_at = await self._store.save_mapping(
                 expected_generation, normalized, actor, {"mapping": mapping}
             )

@@ -358,6 +358,11 @@ async def _addressed_zone(request: Request, path: str) -> str | None:
     return None
 
 
+class _AuthorizationLost(Exception):
+    """Ownership of the addressed zone changed between the identity check and
+    the locked section, so the mutation must not proceed."""
+
+
 class JournalMiddleware(BaseHTTPMiddleware):
     """Wrap journal-relevant /api/v1 mutations: intent before forward
     (fail-closed 503), finalize after; uncertain on in-flight exceptions."""
@@ -390,12 +395,32 @@ class JournalMiddleware(BaseHTTPMiddleware):
         capture = JournalCapture(
             runtime, pdns, identity, request.method, request.url.path, info, body
         )
-        response = await run_journaled(
-            capture,
-            runtime.zone_lock(capture.zone_name()),
-            lambda: call_next(request),
-            status_of=lambda r: r.status_code,
-        )
+        # Re-resolve ownership inside the per-zone lock, immediately before the
+        # intent row and the forward. IdentityMiddleware already checked it, but
+        # that happens outside this lock and mapping writes take a different
+        # one, so a member whose zone was reassigned or denied in between would
+        # otherwise still land the mutation — and the journal would record it
+        # against them, correctly attributed but no longer authorized. Same
+        # boundary the rollback endpoint enforces.
+        zone_ref = capture.zone_name()
+
+        async def recheck_ownership() -> None:
+            user = identity.effective_user
+            if user is None or not zone_ref:
+                return
+            if runtime.mapping.view.owner_of(zone_ref) != user:
+                raise _AuthorizationLost()
+
+        try:
+            response = await run_journaled(
+                capture,
+                runtime.zone_lock(zone_ref),
+                lambda: call_next(request),
+                status_of=lambda r: r.status_code,
+                before_intent=recheck_ownership,
+            )
+        except _AuthorizationLost:
+            return _error(403, "zone not owned")
         if response is None:
             return _error(503, "journal unavailable, mutation refused")
         return response
