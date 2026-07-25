@@ -17,6 +17,7 @@ from powerdns_api_proxy.inberlin.journal import (
     run_journaled,
 )
 from powerdns_api_proxy.inberlin.keys import generate_key
+from powerdns_api_proxy.inberlin.mapping import DuplicateZoneOwner
 from powerdns_api_proxy.inberlin.names import canonical_user, canonical_zone
 from powerdns_api_proxy.inberlin.rollback import (
     NotRollbackable,
@@ -99,6 +100,9 @@ async def put_mapping(body: MappingPut, if_match: str | None = Header(None)):
         generation = await rt.mapping.replace(expected, body.mapping, identity.actor)
     except GenerationMismatch as e:
         raise HTTPException(409, f"generation mismatch, current is {e.current}")
+    except DuplicateZoneOwner as e:
+        # Ambiguous ownership would make owner_of() depend on dict ordering.
+        raise HTTPException(422, str(e))
     orphans = rt.mapping.orphaned_overrides()
     return {"generation": generation, "orphaned_overrides": orphans}
 
@@ -114,6 +118,8 @@ async def patch_mapping(body: MappingPatch, if_match: str | None = Header(None))
         )
     except GenerationMismatch as e:
         raise HTTPException(409, f"generation mismatch, current is {e.current}")
+    except DuplicateZoneOwner as e:
+        raise HTTPException(422, str(e))
     return {
         "generation": generation,
         "orphaned_overrides": rt.mapping.orphaned_overrides(),
@@ -348,6 +354,17 @@ async def rollback_journal_entry(
     capture = JournalCapture(rt, pdns, identity, method, path, info, payload)
 
     async def drift_check() -> None:
+        # Re-check ownership HERE, not only above: this runs after the per-zone
+        # lock is held and immediately before journal intent and the upstream
+        # mutation, whereas the earlier check happens while any concurrent
+        # mapping update can still land (mapping writes take a different lock).
+        # Without this, a member whose zone was reassigned or denied between the
+        # two points could still roll the zone back. The earlier check stays as
+        # a cheap early rejection; this one is the security boundary.
+        if not identity.is_admin:
+            current = rt.mapping.view.owner_of(entry["zone"])
+            if current != identity.effective_user:
+                raise HTTPException(403, "no current authorization on this zone")
         if body.force:
             return
         try:

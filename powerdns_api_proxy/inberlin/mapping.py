@@ -82,6 +82,30 @@ class MappingView:
         return best_owned[1] if best_owned else None
 
 
+class DuplicateZoneOwner(ValueError):
+    """Two users were assigned the same exact zone."""
+
+
+def _reject_duplicate_owners(mapping: dict[str, set[str]]) -> None:
+    """A zone may be owned by exactly one user.
+
+    Parent/child ownership is legitimate and resolved by longest-suffix match,
+    but the SAME canonical zone under two users is not: owner_of() would return
+    whichever equally-deep entry it happened to iterate first, so authorization
+    would depend on dict ordering and could flip after an unrelated re-export.
+    Refuse the write instead of publishing an ambiguous view.
+    """
+    seen: dict[str, str] = {}
+    for user, zones in mapping.items():
+        for zone in zones:
+            other = seen.get(zone)
+            if other is not None and other != user:
+                raise DuplicateZoneOwner(
+                    f"zone {zone} assigned to both {other} and {user}"
+                )
+            seen[zone] = user
+
+
 class MappingState:
     """Mutable holder of the current MappingView; writes go through the Store
     with generation CAS, then swap the view reference (atomic for readers)."""
@@ -142,6 +166,7 @@ class MappingState:
             canonical_user(user): {canonical_zone(z) for z in zones}
             for user, zones in mapping.items()
         }
+        _reject_duplicate_owners(normalized)
         async with self._mutation_lock:
             new_gen, applied_at = await self._store.save_mapping(
                 expected_generation, normalized, actor, {"mapping": mapping}
@@ -176,6 +201,7 @@ class MappingState:
                     current[cuser] -= {canonical_zone(z) for z in zones}
                     if not current[cuser]:
                         del current[cuser]
+            _reject_duplicate_owners(current)
             new_gen, applied_at = await self._store.save_mapping(
                 expected_generation,
                 current,

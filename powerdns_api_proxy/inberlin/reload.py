@@ -1,12 +1,24 @@
 """Static YAML reload via SIGHUP or POST /proxy/v1/admin/reload.
 
-Only the static config (upstream token, environments, inberlin settings) is
-re-read; dynamic state (mapping, keys, journal) lives in SQLite and memory and
-is unaffected. Upstream load_config() is lru_cached — clearing both caches and
-re-validating achieves an atomic swap (the caches repopulate on next call)."""
+Re-read: the environment map (tokens -> grants) and the hot-swappable half of
+the inberlin settings. Dynamic state (mapping, keys, journal) lives in SQLite
+and memory and is unaffected.
+
+NOT re-read, and warned about instead of silently half-applied:
+  * RESTART_REQUIRED_FIELDS below — baked into objects built at startup.
+  * pdns_api_url / pdns_api_token — the PDNSConnector is constructed once at
+    import in proxy.py, so rotating the upstream credential needs a restart.
+
+The swap is NOT atomic across those two halves: the environment map and the
+settings object are separate references. Reloads are serialized (see the lock
+below) and the ordering is chosen so the window fails closed for the case that
+matters (see reload_static_config), but a caller that needs a guaranteed
+coherent switch should restart. The ansible role does exactly that: it restarts
+on any config change and never notifies a reload."""
 
 import os
 import signal
+import threading
 from pathlib import Path
 
 from powerdns_api_proxy.config import load_config
@@ -17,10 +29,29 @@ from powerdns_api_proxy.inberlin.settings import (
 from powerdns_api_proxy.logging import logger
 
 
+# Serializes reloads. A SIGHUP can interrupt the main thread at any bytecode,
+# including one inside an in-flight reload started by POST /proxy/v1/admin/reload
+# (which runs in a worker thread) — this code is not reentrant, and two
+# interleaved reloads could combine settings from one version of the file with
+# environments from another. Acquired NON-blocking precisely because a signal
+# handler must never wait on a lock the interrupted code may already hold.
+_reload_lock = threading.Lock()
+
+
 def reload_static_config() -> None:
     """Reload the static YAML. Validates the new file BEFORE clearing the live
     caches, so a broken config leaves the running process untouched instead of
     emptying load_config()'s cache and 500-ing every subsequent request."""
+    if not _reload_lock.acquire(blocking=False):
+        logger.warning("reload already in progress; ignoring this request")
+        return
+    try:
+        _reload_locked()
+    finally:
+        _reload_lock.release()
+
+
+def _reload_locked() -> None:
     logger.info("reloading static configuration")
     path = os.getenv("PROXY_CONFIG_PATH")
     if not path:
@@ -28,7 +59,20 @@ def reload_static_config() -> None:
 
     # Parse-check against a fresh path (cache-miss) without disturbing the
     # currently cached objects. Raises on a broken file — caches stay warm.
-    load_config(Path(path))
+    candidate = load_config(Path(path))
+    previous = load_config()
+
+    # The connector holding these was built at import and is never rebuilt, so
+    # a rotated upstream credential would look applied and would not be.
+    if (
+        candidate.pdns_api_url != previous.pdns_api_url
+        or candidate.pdns_api_token != previous.pdns_api_token
+    ):
+        logger.warning(
+            "pdns_api_url/pdns_api_token changed, but the upstream connector is "
+            "built once at startup: the OLD upstream credential stays in use "
+            "until the service is restarted"
+        )
 
     # New file is valid. Settings go live BEFORE the environment map is swapped,
     # because the two are not swapped atomically and the ordering decides which
@@ -36,7 +80,9 @@ def reload_static_config() -> None:
     # rotates a token and narrows webui_source_ips has the tighter source-IP
     # rule already in force while the new token becomes valid; the reverse order
     # leaves a window where the new token is accepted from the old, now
-    # forbidden, source address.
+    # forbidden, source address. The mirror-image case (widening source IPs while
+    # rotating a token) is briefly permissive instead — unavoidable without one
+    # atomic snapshot, which is why the deployment restarts rather than reloads.
     reset_settings_cache()
     settings = load_inberlin_settings()
     _apply_to_runtime(settings)
@@ -97,11 +143,25 @@ def _apply_to_runtime(settings) -> None:
         for field in RESTART_REQUIRED_FIELDS
         if getattr(runtime.settings, field) != getattr(settings, field)
     ]
-    runtime.settings = settings
+
+    # Carry the restart-required fields forward from the LIVE settings instead of
+    # publishing the new file's values for them. Publishing them produced a
+    # hybrid configuration whose behavior depended on which component read a
+    # field: middleware would read the new oidc block while runtime.oidc still
+    # validated with the old one, and the new deny lists would appear in
+    # settings while mapping.view kept enforcing the old ones. Everything that
+    # can genuinely be swapped is swapped; everything that cannot keeps the
+    # value the running objects actually enforce, so settings and behavior
+    # always agree.
+    runtime.settings = settings.model_copy(
+        update={
+            field: getattr(runtime.settings, field) for field in RESTART_REQUIRED_FIELDS
+        }
+    )
     if stale:
         logger.warning(
-            "reload applied, but these settings only take effect after a "
-            f"restart: {', '.join(stale)}"
+            "reload applied, but these settings still hold their previous "
+            f"values and only change on restart: {', '.join(stale)}"
         )
 
 

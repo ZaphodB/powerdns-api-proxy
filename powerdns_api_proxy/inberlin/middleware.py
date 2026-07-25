@@ -63,10 +63,26 @@ class RateLimiter:
             "webui-global": webui_global_mutations_per_minute,
         }
         self.events: dict[tuple[str, str], deque] = defaultdict(deque)
+        self._hits = 0
+
+    # Sweep every N hits. The bucket key for act-as traffic is the impersonated
+    # member name, which a compromised or buggy UI backend can vary freely, so
+    # without eviction a single credential grows the dict without bound: entries
+    # were only ever trimmed when the SAME key was hit again, and the dict entry
+    # itself was never removed. The global act-as mutation cap limits the rate,
+    # not the number of distinct keys.
+    _SWEEP_EVERY = 1000
+
+    def _sweep(self, now: float) -> None:
+        for key in [k for k, q in self.events.items() if not q or q[-1] < now - 60]:
+            del self.events[key]
 
     def hit(self, bucket: str, key: str) -> bool:
         """Records an event; returns True if over limit."""
         now = time.monotonic()
+        self._hits += 1
+        if self._hits % self._SWEEP_EVERY == 0:
+            self._sweep(now)
         q = self.events[(bucket, key)]
         q.append(now)
         while q and q[0] < now - 60:

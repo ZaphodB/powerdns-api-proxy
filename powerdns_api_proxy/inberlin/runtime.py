@@ -124,6 +124,27 @@ def get_runtime() -> Runtime | None:
     return _runtime
 
 
+def assert_roles_match_environments(settings) -> None:
+    """Every environment_roles key must name a configured environment.
+
+    settings.py rejects unknown role VALUES, but an unknown KEY is the more
+    dangerous typo and needs the environment list to detect: writing
+    `registrarr: [registrar]` is valid YAML with a valid role, and it leaves the
+    real `registrar` environment with no roles at all — which means the /api/v1
+    service-credential gate stops applying to it and the token is accepted on
+    the PowerDNS surface again. Fail at startup where it is visible.
+    """
+    from powerdns_api_proxy.config import load_config
+
+    configured = {env.name for env in load_config().environments}
+    orphans = sorted(set(settings.environment_roles) - configured)
+    if orphans:
+        raise ValueError(
+            f"environment_roles names no such environment: {orphans}; "
+            f"configured environments are {sorted(configured)}"
+        )
+
+
 async def init_runtime() -> Runtime | None:
     """App-lifespan entry point: build and start the runtime, or return None
     (extension disabled) when no `inberlin:` config block exists."""
@@ -132,6 +153,7 @@ async def init_runtime() -> Runtime | None:
     if settings is None:
         logger.info("inberlin extension disabled (no config block)")
         return None
+    assert_roles_match_environments(settings)
     _runtime = Runtime(settings)
     await _runtime.start()
     return _runtime
