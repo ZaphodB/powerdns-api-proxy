@@ -32,6 +32,7 @@ from powerdns_api_proxy.config import (
     get_only_pdns_zones_allowed,
     load_config,
 )
+from powerdns_api_proxy.inberlin.reload import install_sighup_handler
 from powerdns_api_proxy.exceptions import (
     MetadataNotAllowedException,
     RessourceNotAllowedException,
@@ -67,15 +68,21 @@ pdns = PDNSConnector(
     config.pdns_api_url, config.pdns_api_token, config.pdns_api_verify_ssl
 )
 
+# Installed at import, NOT in the lifespan hook below. Until the handler exists,
+# Python's default disposition for SIGHUP terminates the process, so a
+# `systemctl reload` that raced a start -- e.g. a config-management run that
+# notifies restart and reload in the same pass -- silently killed the service:
+# the exit is clean, so Restart=on-failure does not fire either. Observed on
+# ans0, 2026-07-25. Safe this early because reload_static_config() only touches
+# the static config caches and never assumes the inberlin runtime exists.
+install_sighup_handler()
+
 
 @asynccontextmanager
 async def _startup(app: FastAPI):
-    from powerdns_api_proxy.inberlin.reload import install_sighup_handler
     from powerdns_api_proxy.inberlin.runtime import init_runtime, shutdown_runtime
 
-    runtime = await init_runtime()
-    if runtime is not None:
-        install_sighup_handler()
+    await init_runtime()
     yield
     await shutdown_runtime()
 
