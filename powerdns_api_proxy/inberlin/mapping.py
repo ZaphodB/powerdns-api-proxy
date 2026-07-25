@@ -15,6 +15,7 @@ from powerdns_api_proxy.inberlin.names import (
     zone_is_or_under,
 )
 from powerdns_api_proxy.inberlin.store import Store
+from powerdns_api_proxy.logging import logger
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,18 @@ class MappingState:
     async def _reload_locked(self) -> None:
         """Rebuild the view from the store; caller must hold _mutation_lock."""
         generation, applied_at, mapping, overrides = await self._store.load_mapping()
+        # Writes reject duplicates, but a snapshot written before that check
+        # existed — or edited directly in SQLite — would load silently and then
+        # make every subsequent PATCH 422, with nothing saying why. Warn instead
+        # of refusing: the mapping in the database is what is already live.
+        try:
+            _reject_duplicate_owners(mapping)
+        except DuplicateZoneOwner as e:
+            logger.warning(
+                f"stored mapping has ambiguous ownership ({e}); ownership "
+                "resolution for that zone is arbitrary and mapping PATCH will "
+                "be refused until it is corrected"
+            )
         self.view = self._build(generation, mapping, overrides, applied_at)
 
     def _build(

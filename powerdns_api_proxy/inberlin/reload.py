@@ -38,17 +38,24 @@ from powerdns_api_proxy.logging import logger
 _reload_lock = threading.Lock()
 
 
-def reload_static_config() -> None:
+def reload_static_config() -> bool:
     """Reload the static YAML. Validates the new file BEFORE clearing the live
     caches, so a broken config leaves the running process untouched instead of
-    emptying load_config()'s cache and 500-ing every subsequent request."""
+    emptying load_config()'s cache and 500-ing every subsequent request.
+
+    Returns False when another reload was already in flight and this one was
+    skipped — the caller must not report success for a reload that did not
+    happen, which is the same class of lie as a reload that silently applies
+    nothing.
+    """
     if not _reload_lock.acquire(blocking=False):
         logger.warning("reload already in progress; ignoring this request")
-        return
+        return False
     try:
         _reload_locked()
     finally:
         _reload_lock.release()
+    return True
 
 
 def _reload_locked() -> None:
@@ -85,6 +92,21 @@ def _reload_locked() -> None:
     # atomic snapshot, which is why the deployment restarts rather than reloads.
     reset_settings_cache()
     settings = load_inberlin_settings()
+
+    # Same cross-check init_runtime() does, against the CANDIDATE environments —
+    # not the ones still cached, which is why it happens here rather than inside
+    # _apply_to_runtime. Renaming an environment (or mistyping a role key) and
+    # reloading would otherwise leave the real environment with no roles, which
+    # silently disables the /api/v1 service-credential gate for it. Refusing the
+    # reload keeps the last known-good config live, matching the contract that a
+    # bad file never disturbs a running process.
+    if settings is not None:
+        from powerdns_api_proxy.inberlin.runtime import roles_vs_environments_error
+
+        problem = roles_vs_environments_error(settings, candidate)
+        if problem:
+            raise ValueError(f"refusing reload: {problem}")
+
     _apply_to_runtime(settings)
 
     load_config.cache_clear()

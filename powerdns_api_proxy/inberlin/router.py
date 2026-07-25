@@ -615,5 +615,10 @@ async def admin_reload():
     from powerdns_api_proxy.inberlin.reload import reload_static_config
 
     # sync file read + YAML parse — keep it off the event loop
-    await asyncio.to_thread(reload_static_config)
+    reloaded = await asyncio.to_thread(reload_static_config)
+    if not reloaded:
+        # Another reload (e.g. a SIGHUP) held the lock; ours did nothing, and
+        # saying "reloaded" would be exactly the sort of false success this
+        # endpoint's own contract is meant to avoid.
+        raise HTTPException(409, "another reload is already in progress")
     return {"reloaded": True}

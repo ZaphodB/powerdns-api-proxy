@@ -80,6 +80,16 @@ class ProxyConfigEnvironment(BaseModel):
     def validate_token(cls, token_sha512):
         if len(token_sha512) != 128:
             raise ValueError("A SHA512 hash must be 128 digits long")
+        # Lookups key on hashlib's digest().hex(), which is LOWERCASE hex, and
+        # token_env_map stores this value verbatim. An uppercase or non-hex
+        # digest therefore parses fine, deploys fine, and can never match any
+        # token — the credential is silently dead forever, with nothing in the
+        # logs to say why. Fail at config load instead.
+        if any(c not in "0123456789abcdef" for c in token_sha512):
+            raise ValueError(
+                "A SHA512 hash must be lowercase hex (0-9a-f); tokens are "
+                "matched against hashlib's digest().hex() verbatim"
+            )
         return token_sha512
 
     def __init__(self, **data):

@@ -124,25 +124,38 @@ def get_runtime() -> Runtime | None:
     return _runtime
 
 
-def assert_roles_match_environments(settings) -> None:
-    """Every environment_roles key must name a configured environment.
+def roles_vs_environments_error(settings, config=None) -> str | None:
+    """Describe an environment_roles key that names no configured environment.
 
     settings.py rejects unknown role VALUES, but an unknown KEY is the more
     dangerous typo and needs the environment list to detect: writing
     `registrarr: [registrar]` is valid YAML with a valid role, and it leaves the
     real `registrar` environment with no roles at all — which means the /api/v1
     service-credential gate stops applying to it and the token is accepted on
-    the PowerDNS surface again. Fail at startup where it is visible.
-    """
-    from powerdns_api_proxy.config import load_config
+    the PowerDNS surface again.
 
-    configured = {env.name for env in load_config().environments}
+    Takes an explicit config so the reload path can check the CANDIDATE
+    environments rather than the ones still cached. Returns None when fine.
+    """
+    if config is None:
+        from powerdns_api_proxy.config import load_config
+
+        config = load_config()
+    configured = {env.name for env in config.environments}
     orphans = sorted(set(settings.environment_roles) - configured)
-    if orphans:
-        raise ValueError(
-            f"environment_roles names no such environment: {orphans}; "
-            f"configured environments are {sorted(configured)}"
-        )
+    if not orphans:
+        return None
+    return (
+        f"environment_roles names no such environment: {orphans}; "
+        f"configured environments are {sorted(configured)}"
+    )
+
+
+def assert_roles_match_environments(settings) -> None:
+    """Startup form of roles_vs_environments_error: refuse to start on mismatch."""
+    problem = roles_vs_environments_error(settings)
+    if problem:
+        raise ValueError(problem)
 
 
 async def init_runtime() -> Runtime | None:

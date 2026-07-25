@@ -7,6 +7,7 @@ the same commit behaved differently depending on how it had been cloned.
 """
 
 import importlib.util
+import re
 from pathlib import Path
 
 from packaging.version import Version
@@ -19,7 +20,9 @@ def _pep440():
     source = SETUP_PY.read_text(encoding="utf-8")
     start = source.index("def _pep440")
     end = source.index("try:", start)
-    namespace: dict = {}
+    # setup.py's own imports are not executed here, so provide what the helper
+    # uses; keep this in step with the function's dependencies.
+    namespace: dict = {"re": re}
     exec(compile(source[start:end], str(SETUP_PY), "exec"), namespace)
     return namespace["_pep440"]
 
@@ -31,6 +34,11 @@ def test_describe_shapes_are_valid_pep440():
         "1.11.1\n": "1.11.1",
         "v1.11.1-35-g0f54f1f\n": "1.11.1+35.g0f54f1f",
         "v1.11.1-1-gabc1234": "1.11.1+1.gabc1234",
+        # A dashed tag name must not be mistaken for the describe suffix. It
+        # also cannot be expressed as a PEP 440 release, so it falls back
+        # rather than emitting something setuptools would reject.
+        "v1.11-inberlin\n": "1.0.0",
+        "v1.11-inberlin-3-gabc1234": "1.0.0",
     }
     for described, expected in cases.items():
         got = fn(described)
