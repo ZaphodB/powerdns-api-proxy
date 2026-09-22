@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS journal (
   actor_kind TEXT NOT NULL,
   impersonator TEXT,
   webui_user TEXT,
+  raw_user_header TEXT,          -- X-Teilnehmer / X-Impersonate-Teilnehmer as sent
   zone TEXT NOT NULL,
   method TEXT NOT NULL,
   path TEXT NOT NULL,
@@ -150,6 +151,11 @@ class Store:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        # CREATE TABLE IF NOT EXISTS never alters an existing table; add
+        # columns introduced after the first deployment here.
+        journal_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(journal)")}
+        if "raw_user_header" not in journal_cols:
+            self._conn.execute("ALTER TABLE journal ADD COLUMN raw_user_header TEXT")
         self._conn.commit()
         if self._conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
             self._conn.execute("VACUUM")
@@ -445,9 +451,9 @@ class Store:
         def run(c: sqlite3.Connection) -> int:
             cur = c.execute(
                 "INSERT INTO journal (ts, status, user, actor, actor_kind,"
-                " impersonator, webui_user, zone, method, path, operation,"
-                " raw_request, before_state, rollback_of)"
-                " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " impersonator, webui_user, raw_user_header, zone, method, path,"
+                " operation, raw_request, before_state, rollback_of)"
+                " VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _utcnow(),
                     identity.effective_user,
@@ -455,6 +461,7 @@ class Store:
                     identity.kind,
                     identity.impersonator,
                     identity.webui_user,
+                    identity.raw_user_header,
                     zone,
                     method,
                     path,

@@ -18,6 +18,9 @@ class Identity:
     effective_user: str | None = None  # canonical
     impersonator: str | None = None  # oidc sub of admin, if impersonating
     webui_user: str | None = None  # htpasswd login behind the webui token
+    # X-Teilnehmer / X-Impersonate-Teilnehmer exactly as sent, before
+    # canonicalization — journaled separately for forensics (plan D4)
+    raw_user_header: str | None = None
     is_admin: bool = False
     roles: tuple[str, ...] = ()
 

@@ -217,6 +217,7 @@ def _journal_row_public(row: dict) -> dict:
             "actor_kind",
             "impersonator",
             "webui_user",
+            "raw_user_header",
             "zone",
             "method",
             "path",

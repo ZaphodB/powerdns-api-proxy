@@ -336,3 +336,20 @@ def test_journal_prune_returns_space_to_the_filesystem(store):
     assert run(store.journal_prune(0)) == 200
     after = run(store.db_size_bytes())
     assert after < before / 4
+
+
+def test_existing_journal_gains_raw_user_header_column(tmp_path):
+    # CREATE TABLE IF NOT EXISTS never alters an existing table: a journal
+    # created before the column existed must be migrated on open
+    path = str(tmp_path / "old.sqlite")
+    Store(path).close()
+    old = sqlite3.connect(path)
+    old.execute("ALTER TABLE journal DROP COLUMN raw_user_header")
+    old.commit()
+    old.close()
+    s = Store(path)
+    s.close()
+    c = sqlite3.connect(path)
+    cols = {row[1] for row in c.execute("PRAGMA table_info(journal)")}
+    c.close()
+    assert "raw_user_header" in cols

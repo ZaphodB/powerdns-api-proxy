@@ -918,3 +918,27 @@ def test_webui_user_header_forbidden_outside_webui_act_as(client):
     r = client.get("/proxy/v1/whoami", headers=act_as("alice", user="alice-web"))
     assert r.status_code == 200
     assert r.json()["webui_user"] == "alice-web"
+
+
+def test_journal_keeps_raw_identity_header(client):
+    # plan D4: effective (canonical) User and the raw header are stored
+    # separately, for forensics — "ALICE" canonicalizes to "alice"
+    r = client.patch(
+        f"{ZONES_PATH}/kunde.example.",
+        headers={"X-API-Key": WEBUI_TOKEN, "X-Teilnehmer": "ALICE"},
+        json=PATCH_BODY,
+    )
+    assert r.status_code == 204
+    r = client.patch(
+        f"{ZONES_PATH}/kunde.example.",
+        headers=bearer(admin=True, **{"X-Impersonate-Teilnehmer": "Alice"}),
+        json=PATCH_BODY,
+    )
+    assert r.status_code == 204
+
+    entries = client.get("/proxy/v1/journal", headers=act_as("alice")).json()["entries"]
+    by_kind = {e["actor_kind"]: e for e in entries}
+    assert by_kind["webui-act-as"]["user"] == "alice"
+    assert by_kind["webui-act-as"]["raw_user_header"] == "ALICE"
+    assert by_kind["oidc"]["user"] == "alice"
+    assert by_kind["oidc"]["raw_user_header"] == "Alice"

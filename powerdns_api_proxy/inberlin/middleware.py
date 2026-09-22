@@ -185,6 +185,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                         actor=static_env.name,
                         effective_user=user_value,
                         webui_user=x_webui_user,
+                        raw_user_header=x_tn,
                         roles=roles,
                     )
                     environment = environment_for_user(user_value, runtime.mapping.view)
@@ -245,6 +246,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                     display=username,
                     effective_user=user_value,
                     impersonator=sub,
+                    raw_user_header=x_imp,
                     is_admin=True,
                 )
                 environment = environment_for_user(user_value, runtime.mapping.view)
