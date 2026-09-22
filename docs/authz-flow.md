@@ -16,9 +16,10 @@ credentials`. None → `401`.
 | `tn-key` | `X-API-Key` matching a hashed per-User key in SQLite | member automation (ACME, octoDNS) |
 
 `X-API-Key` lookup order: static env map first (config-defined, sha512), then
-`tn-key` store. A `static` env without the `webui` role carrying `X-Teilnehmer` or
-`X-Impersonate-Teilnehmer` → `403` (never ignored). `tn-key` carrying either
-header → `403`. Duplicate identity headers → `400`.
+`tn-key` store. A `static` env without the `webui` role carrying `X-Teilnehmer`,
+`X-Impersonate-Teilnehmer` or `X-Webui-User` → `403` (never ignored). `tn-key`
+carrying any of them → `403`; `oidc` carrying `X-Teilnehmer` or `X-Webui-User`
+→ `403`. Duplicate identity headers → `400`.
 
 ## Sequence (per request)
 

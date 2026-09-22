@@ -188,7 +188,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                         roles=roles,
                     )
                     environment = environment_for_user(user_value, runtime.mapping.view)
-                elif x_tn or x_imp:
+                elif x_tn or x_imp or x_webui_user:
                     return _error(
                         403, "identity headers not allowed for this credential"
                     )
@@ -208,7 +208,7 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                     ):
                         return _error(429, "rate limited")
                     return _error(401, "Unauthorized")
-                if x_tn or x_imp:
+                if x_tn or x_imp or x_webui_user:
                     return _error(403, "identity headers not allowed for API keys")
                 identity = Identity(kind="tn-key", actor=user, effective_user=user)
                 environment = environment_for_user(user, runtime.mapping.view)
@@ -233,6 +233,8 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             username = claims.get(oidc_settings.username_claim, sub)
             if x_tn:
                 return _error(403, "X-Teilnehmer not allowed with OIDC")
+            if x_webui_user:
+                return _error(403, "X-Webui-User not allowed with OIDC")
             if x_imp:
                 if not is_admin:
                     return _error(403, "impersonation requires admin group")

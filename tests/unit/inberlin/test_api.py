@@ -892,3 +892,29 @@ def test_zone_delete_rollback_recreated_409(client, fake_pdns):
     }
     r = client.post(f"/proxy/v1/journal/{entry['id']}/rollback", headers=admin)
     assert r.status_code == 409
+
+
+def test_webui_user_header_forbidden_outside_webui_act_as(client):
+    # authz-flow.md: an identity header on a credential that cannot carry it is
+    # refused, never silently ignored. X-Webui-User belongs to webui act-as only.
+    hdr = {"X-Webui-User": "mallory"}
+    r = client.get(ZONES_PATH, headers={"X-API-Key": PLAIN_TOKEN, **hdr})
+    assert r.status_code == 403
+    r = client.get(ZONES_PATH, headers={"X-API-Key": ADMIN_TOKEN, **hdr})
+    assert r.status_code == 403
+    r = client.get(ZONES_PATH, headers=bearer(admin=True, **hdr))
+    assert r.status_code == 403
+
+    r = client.post(
+        "/proxy/v1/keys",
+        headers=bearer(admin=True, **{"X-Impersonate-Teilnehmer": "alice"}),
+        json={"label": "x"},
+    )
+    key = r.json()["key"]
+    r = client.get(ZONES_PATH, headers={"X-API-Key": key, **hdr})
+    assert r.status_code == 403
+
+    # still accepted where it belongs
+    r = client.get("/proxy/v1/whoami", headers=act_as("alice", user="alice-web"))
+    assert r.status_code == 200
+    assert r.json()["webui_user"] == "alice-web"

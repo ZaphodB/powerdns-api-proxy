@@ -34,7 +34,8 @@ is a plain upstream environment, untouched by the extension.
 - **MET** — static env with role `metrics`
 
 Impersonation: `X-Impersonate-Teilnehmer` — OIDC admins only (a static admin
-env sending it gets `403`), journaled with both identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
+env sending it gets `403`), journaled with both identities. `X-Webui-User` — htpasswd login behind the webui token, journaled; on any
+other credential it is refused with `403`, never ignored.
 
 The webui act-as token is additionally **bound to configured source IPs**
 (`webui_source_ips`): on the WireGuard overlay, cryptokey routing makes peer
