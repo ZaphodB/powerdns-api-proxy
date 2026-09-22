@@ -4,6 +4,9 @@ identity, health/ready, reload (docs/api-contract.md)."""
 import asyncio
 import dataclasses
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -11,6 +14,7 @@ from pydantic import BaseModel
 
 from powerdns_api_proxy.inberlin.identity import Identity, current_identity
 from powerdns_api_proxy.inberlin.journal import (
+    OPERATIONS,
     JournalCapture,
     classify,
     fetch_zone,
@@ -51,9 +55,12 @@ def _require_admin(identity: Identity) -> None:
         raise HTTPException(403, "admin required")
 
 
-def _require_exporter_or_admin(identity: Identity) -> None:
-    if not (identity.is_admin or EXPORTER in identity.roles):
-        raise HTTPException(403, "exporter or admin required")
+def _require_admin_or_role(identity: Identity, *roles: str) -> None:
+    """Admin, or a static env holding one of `roles`. Admin is checked via
+    is_admin, never via the roles list: an act-as identity inherits its env's
+    full role list without being an admin."""
+    if not (identity.is_admin or set(roles) & set(identity.roles)):
+        raise HTTPException(403, f"admin or {' or '.join(roles)} credential required")
 
 
 def _require_session_user(identity: Identity) -> str:
@@ -79,6 +86,26 @@ def _require_generation(if_match: str | None) -> int:
         raise HTTPException(400, "If-Match must be an integer generation")
 
 
+@contextmanager
+def _mapping_write_errors() -> Iterator[None]:
+    """Map mapping/override CAS failures to their HTTP status."""
+    try:
+        yield
+    except GenerationMismatch as e:
+        raise HTTPException(409, f"generation mismatch, current is {e.current}")
+    except DuplicateZoneOwner as e:
+        # Ambiguous ownership would make owner_of() depend on dict ordering.
+        raise HTTPException(422, str(e))
+
+
+def _upstream(rt: Runtime):
+    """The upstream connector and configured server id. Imported lazily:
+    powerdns_api_proxy.proxy imports this router."""
+    from powerdns_api_proxy.proxy import pdns
+
+    return pdns, rt.settings.upstream_server_id
+
+
 # -- mapping ---------------------------------------------------------------
 
 
@@ -94,15 +121,10 @@ class MappingPatch(BaseModel):
 @router.put("/mapping")
 async def put_mapping(body: MappingPut, if_match: str | None = Header(None)):
     rt, identity = _runtime(), _identity()
-    _require_exporter_or_admin(identity)
+    _require_admin_or_role(identity, EXPORTER)
     expected = _require_generation(if_match)
-    try:
+    with _mapping_write_errors():
         generation = await rt.mapping.replace(expected, body.mapping, identity.actor)
-    except GenerationMismatch as e:
-        raise HTTPException(409, f"generation mismatch, current is {e.current}")
-    except DuplicateZoneOwner as e:
-        # Ambiguous ownership would make owner_of() depend on dict ordering.
-        raise HTTPException(422, str(e))
     orphans = rt.mapping.orphaned_overrides()
     return {"generation": generation, "orphaned_overrides": orphans}
 
@@ -110,16 +132,12 @@ async def put_mapping(body: MappingPut, if_match: str | None = Header(None)):
 @router.patch("/mapping")
 async def patch_mapping(body: MappingPatch, if_match: str | None = Header(None)):
     rt, identity = _runtime(), _identity()
-    _require_exporter_or_admin(identity)
+    _require_admin_or_role(identity, EXPORTER)
     expected = _require_generation(if_match)
-    try:
+    with _mapping_write_errors():
         generation = await rt.mapping.patch(
             expected, body.add, body.remove, identity.actor
         )
-    except GenerationMismatch as e:
-        raise HTTPException(409, f"generation mismatch, current is {e.current}")
-    except DuplicateZoneOwner as e:
-        raise HTTPException(422, str(e))
     return {
         "generation": generation,
         "orphaned_overrides": rt.mapping.orphaned_overrides(),
@@ -175,11 +193,10 @@ async def create_override(body: OverrideCreate, if_match: str | None = Header(No
     expected = _require_generation(if_match)
     zone = canonical_zone(body.zone)
     try:
-        override_id, generation = await rt.mapping.add_override(
-            expected, zone, canonical_user(body.user), identity.actor, body.note
-        )
-    except GenerationMismatch as e:
-        raise HTTPException(409, f"generation mismatch, current is {e.current}")
+        with _mapping_write_errors():
+            override_id, generation = await rt.mapping.add_override(
+                expected, zone, canonical_user(body.user), identity.actor, body.note
+            )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "override for this zone already exists")
     return {"id": override_id, "zone": zone, "generation": generation}
@@ -190,12 +207,10 @@ async def delete_override(override_id: int, if_match: str | None = Header(None))
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
     expected = _require_generation(if_match)
-    try:
+    with _mapping_write_errors():
         deleted, generation = await rt.mapping.delete_override(
             expected, override_id, identity.actor
         )
-    except GenerationMismatch as e:
-        raise HTTPException(409, f"generation mismatch, current is {e.current}")
     if not deleted:
         raise HTTPException(404, "override not found")
     return {"deleted": override_id, "generation": generation}
@@ -243,13 +258,13 @@ async def query_journal(
 ):
     rt, identity = _runtime(), _identity()
     if identity.is_admin:
-        tn_filter = canonical_user(user) if user else None
+        user_filter = canonical_user(user) if user else None
     else:
         if user is not None:
             raise HTTPException(403, "user filter is admin-only")
-        tn_filter = _require_session_user(identity)
+        user_filter = _require_session_user(identity)
     rows = await rt.store.journal_query(
-        user=tn_filter,
+        user=user_filter,
         zone=canonical_zone(zone) if zone else None,
         name=canonical_zone(name) if name else None,
         rtype=type,
@@ -271,9 +286,7 @@ async def journal_uncertain():
     uncertain = await rt.store.journal_query(status="uncertain", limit=500)
     rows = pending + uncertain
 
-    from powerdns_api_proxy.proxy import pdns
-
-    server_id = rt.settings.upstream_server_id
+    pdns, server_id = _upstream(rt)
     upstream: dict[str, dict | None] = {}
     for zone in {r["zone"] for r in rows} - {"."}:
         try:
@@ -295,15 +308,13 @@ async def get_journal_entry(journal_id: int):
 
 
 class ResolveBody(BaseModel):
-    status: str  # committed | failed
+    status: Literal["committed", "failed"]
 
 
 @router.post("/journal/{journal_id}/resolve")
 async def resolve_journal_entry(journal_id: int, body: ResolveBody):
     rt, identity = _runtime(), _identity()
     _require_admin(identity)
-    if body.status not in ("committed", "failed"):
-        raise HTTPException(400, "status must be committed or failed")
     if not await rt.store.journal_resolve(journal_id, body.status, identity.actor):
         raise HTTPException(409, "entry not pending/uncertain")
     return {"id": journal_id, "status": body.status}
@@ -337,12 +348,11 @@ async def rollback_journal_entry(
         if owner != identity.effective_user:
             raise HTTPException(403, "no current authorization on this zone")
 
-    from powerdns_api_proxy.proxy import pdns
+    spec = OPERATIONS[entry["operation"]]
+    if spec.rollback_admin_only and not identity.is_admin:
+        raise HTTPException(403, f"{entry['operation']} rollback is admin-only")
 
-    server_id = rt.settings.upstream_server_id
-
-    if entry["operation"] == "zone-create" and not identity.is_admin:
-        raise HTTPException(403, "zone deletion rollback is admin-only")
+    pdns, server_id = _upstream(rt)
 
     try:
         method, suffix, payload = build_rollback_request(entry)
@@ -391,11 +401,9 @@ async def rollback_journal_entry(
         "rolled_back": journal_id,
         "journal_id": capture.journal_id,
     }
-    if entry["operation"] == "zone-delete":
-        # Recreate-from-export cannot restore DNSSEC keys or catalog
-        # membership (docs/api-contract.md line 79-80) — flag the loss.
+    if spec.rollback_lossy:
         result["lossy"] = True
-        result["lossy_detail"] = "DNSSEC and catalog state not restored"
+        result["lossy_detail"] = spec.rollback_lossy
     return result
 
 
@@ -415,8 +423,7 @@ async def register_zone(body: RegisterBody):
     creates with an unconditional 409 (verified in auth-5.1.x ws-auth.cc),
     so this credential structurally cannot modify existing data."""
     rt, identity = _runtime(), _identity()
-    if not (identity.is_admin or REGISTRAR in identity.roles):
-        raise HTTPException(403, "registrar or admin required")
+    _require_admin_or_role(identity, REGISTRAR)
     reg = rt.settings.registration
     if reg is None:
         raise HTTPException(501, "registration not configured")
@@ -428,9 +435,7 @@ async def register_zone(body: RegisterBody):
     if view.owner_of(zone) is not None:
         raise HTTPException(409, "zone already owned by a User")
 
-    from powerdns_api_proxy.proxy import pdns
-
-    server_id = rt.settings.upstream_server_id
+    pdns, server_id = _upstream(rt)
     try:
         exists = await fetch_zone(pdns, server_id, zone)
     except RuntimeError:
@@ -582,14 +587,9 @@ async def health():
 async def ready():
     rt, identity = _runtime(), _identity()
     # Contract (docs/api-contract.md): ADM/EXP/MET only — webui and registrar
-    # envs have no business reading ops internals. Admin is checked via
-    # is_admin, never via the roles list: an act-as identity inherits its
-    # env's full role list without being an admin.
-    if not (
-        identity.is_admin or EXPORTER in identity.roles or METRICS in identity.roles
-    ):
-        raise HTTPException(403, "admin, exporter or metrics credential required")
-    from powerdns_api_proxy.proxy import pdns
+    # envs have no business reading ops internals.
+    _require_admin_or_role(identity, EXPORTER, METRICS)
+    pdns, _ = _upstream(rt)
 
     upstream_ok = False
     try:

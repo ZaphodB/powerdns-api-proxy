@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, field_validator
 from yaml import safe_load
 
-from powerdns_api_proxy.inberlin.roles import KNOWN_ROLES as KNOWN
+from powerdns_api_proxy.inberlin.roles import KNOWN_ROLES
 
 
 class OIDCSettings(BaseModel):
@@ -70,12 +70,17 @@ class InBerlinSettings(BaseModel):
         it is visible, rather than at authorization time, where it is not.
         """
         unknown = sorted(
-            {role for roles in value.values() for role in roles if role not in KNOWN}
+            {
+                role
+                for roles in value.values()
+                for role in roles
+                if role not in KNOWN_ROLES
+            }
         )
         if unknown:
             raise ValueError(
                 f"unknown role(s) in environment_roles: {unknown}; "
-                f"valid roles are {sorted(KNOWN)}"
+                f"valid roles are {sorted(KNOWN_ROLES)}"
             )
         return value
 

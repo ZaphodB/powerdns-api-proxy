@@ -24,6 +24,15 @@ class OIDCValidator:
         self._fetched_at: float = 0.0
         self._refresh_lock = asyncio.Lock()
 
+    @staticmethod
+    async def _get_json(url: str) -> dict:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp,
+        ):
+            resp.raise_for_status()
+            return await resp.json()
+
     async def _jwks_url(self) -> str:
         """Configured jwks_url, or resolved via OIDC issuer discovery."""
         if self.settings.jwks_url:
@@ -31,13 +40,7 @@ class OIDCValidator:
         discovery = (
             self.settings.issuer.rstrip("/") + "/.well-known/openid-configuration"
         )
-        async with (
-            aiohttp.ClientSession() as session,
-            session.get(discovery, timeout=aiohttp.ClientTimeout(total=10)) as resp,
-        ):
-            resp.raise_for_status()
-            data = await resp.json()
-        return data["jwks_uri"]
+        return (await self._get_json(discovery))["jwks_uri"]
 
     async def _refresh(self) -> None:
         """Fetch JWKS and replace the key cache wholesale (no stale merge)."""
@@ -54,13 +57,7 @@ class OIDCValidator:
             # cooldown, or forged-kid spam degrades into back-to-back
             # fetch attempts (10s timeout each) while the IdP is down
             self._fetched_at = time.monotonic()
-            url = await self._jwks_url()
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp,
-            ):
-                resp.raise_for_status()
-                data = await resp.json()
+            data = await self._get_json(await self._jwks_url())
             keys: dict[str, PyJWK] = {}
             for k in data.get("keys", []):
                 if k.get("use") not in (None, "sig"):

@@ -41,12 +41,22 @@ class OpSpec(NamedTuple):
     rrset_diff: bool = False  # before/after captured as a scoped rrset diff
     recreate: bool = False  # finalize re-fetches the created zone
     restore_from_before: bool = False  # rollbackable iff the before-zone existed
+    # Rolling it back deletes a whole zone: members may not (admin-only).
+    rollback_admin_only: bool = False
+    # Non-empty: what a rollback cannot restore, flagged in its response.
+    rollback_lossy: str = ""
 
 
 OPERATIONS: dict[str, OpSpec] = {
     "rrset-patch": OpSpec(pre_get=True, rrset_diff=True),
-    "zone-create": OpSpec(recreate=True),
-    "zone-delete": OpSpec(pre_get=True, restore_from_before=True),
+    "zone-create": OpSpec(recreate=True, rollback_admin_only=True),
+    # Recreate-from-export cannot restore DNSSEC keys or catalog membership
+    # (docs/api-contract.md) — the rollback response flags the loss.
+    "zone-delete": OpSpec(
+        pre_get=True,
+        restore_from_before=True,
+        rollback_lossy="DNSSEC and catalog state not restored",
+    ),
     "zone-meta": OpSpec(pre_get=True),
     # Zone metadata (/zones/<z>/metadata...). Journaled but not rollbackable:
     # the before-state the journal captures is zone-shaped, and a metadata
@@ -204,19 +214,26 @@ class JournalCapture:
             rollback_of=rollback_of,
         )
 
+    async def _settle_without_after_state(
+        self, status: str, status_code: int | None
+    ) -> None:
+        """Settle the row with no after-state and not rollbackable."""
+        assert self.journal_id is not None
+        await self.runtime.store.journal_finalize(
+            self.journal_id,
+            status=status,
+            status_code=status_code,
+            after_state=None,
+            rollbackable=False,
+        )
+
     async def mark_uncertain(self) -> None:
         """Best-effort: flag the pending row uncertain when the request errored
         after intent (mutation may or may not have reached pdns)."""
         if self.journal_id is None:
             return
         try:
-            await self.runtime.store.journal_finalize(
-                self.journal_id,
-                status="uncertain",
-                status_code=None,
-                after_state=None,
-                rollbackable=False,
-            )
+            await self._settle_without_after_state("uncertain", None)
         except Exception:
             logger.exception(
                 f"could not mark journal entry {self.journal_id} uncertain"
@@ -228,24 +245,12 @@ class JournalCapture:
         or uncertain if the post-GET/store write itself fails."""
         assert self.journal_id is not None
         if 400 <= status_code < 500:
-            await self.runtime.store.journal_finalize(
-                self.journal_id,
-                status="failed",
-                status_code=status_code,
-                after_state=None,
-                rollbackable=False,
-            )
+            await self._settle_without_after_state("failed", status_code)
             return
         if status_code >= 500:
             # A 5xx is as ambiguous as a transport error: pdns may have
             # applied the change before failing. Surface for reconciliation.
-            await self.runtime.store.journal_finalize(
-                self.journal_id,
-                status="uncertain",
-                status_code=status_code,
-                after_state=None,
-                rollbackable=False,
-            )
+            await self._settle_without_after_state("uncertain", status_code)
             return
         try:
             server, zone_id = self.info.server_id, self.info.zone_id
@@ -278,13 +283,7 @@ class JournalCapture:
         except Exception:
             logger.exception(f"journal finalize failed for entry {self.journal_id}")
             try:
-                await self.runtime.store.journal_finalize(
-                    self.journal_id,
-                    status="uncertain",
-                    status_code=status_code,
-                    after_state=None,
-                    rollbackable=False,
-                )
+                await self._settle_without_after_state("uncertain", status_code)
             except Exception:
                 logger.exception("could not even mark journal entry uncertain")
 

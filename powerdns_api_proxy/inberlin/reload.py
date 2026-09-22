@@ -23,6 +23,7 @@ from pathlib import Path
 
 from powerdns_api_proxy.config import load_config
 from powerdns_api_proxy.inberlin.settings import (
+    InBerlinSettings,
     load_inberlin_settings,
     reset_settings_cache,
 )
@@ -140,7 +141,7 @@ RESTART_REQUIRED_FIELDS = (
 )
 
 
-def _apply_to_runtime(settings) -> None:
+def _apply_to_runtime(settings: InBerlinSettings | None) -> None:
     """Point the live runtime at the newly loaded settings.
 
     Without this, a reload updated the module-level caches while every request

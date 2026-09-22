@@ -30,15 +30,22 @@ from powerdns_api_proxy.inberlin.names import canonical_user
 from powerdns_api_proxy.inberlin.runtime import get_runtime
 from powerdns_api_proxy.inberlin.roles import ADMIN, EXPORTER, METRICS, REGISTRAR, WEBUI
 from powerdns_api_proxy.logging import logger
+from powerdns_api_proxy.models import ProxyConfig, ProxyConfigEnvironment
 
+# Proxy-only identity headers: stripped before every upstream forward.
 IDENTITY_HEADERS = (
     "x-teilnehmer",
     "x-impersonate-teilnehmer",
     "x-webui-user",
     "authorization",
 )
+_STRIP = frozenset(h.encode() for h in IDENTITY_HEADERS)
 
 _PUBLIC_PATHS = ("/proxy/v1/health", "/", "/health/pdns", "/metrics")
+
+
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
 
 
 def _error(status: int, detail: str) -> JSONResponse:
@@ -93,7 +100,7 @@ class RateLimiter:
 class IdentityMiddleware(BaseHTTPMiddleware):
     """Resolve exactly one credential class into an Identity + environment.
 
-    Order: X-API-Key (static env → webui act-as / plain static, else TN key)
+    Order: X-API-Key (static env → webui act-as / plain static, else User key)
     XOR Bearer (OIDC admin / impersonation / bridged User). Ambiguous or
     disallowed header combinations are rejected, never precedence-resolved.
     Sets the identity/environment contextvars for the request and strips all
@@ -120,21 +127,15 @@ class IdentityMiddleware(BaseHTTPMiddleware):
         auth_header = request.headers.get("authorization", "")
         if auth_header.lower().startswith("bearer "):
             bearer = auth_header[7:].strip()
-        x_tn = request.headers.get("x-teilnehmer")
+        x_user = request.headers.get("x-teilnehmer")
         x_imp = request.headers.get("x-impersonate-teilnehmer")
         x_webui_user = request.headers.get("x-webui-user")
 
-        for h in (
-            "x-api-key",
-            "authorization",
-            "x-teilnehmer",
-            "x-impersonate-teilnehmer",
-            "x-webui-user",
-        ):
+        for h in ("x-api-key", *IDENTITY_HEADERS):
             if len(request.headers.getlist(h)) > 1:
                 return _error(400, f"duplicate {h} header")
 
-        if x_tn and x_imp:
+        if x_user and x_imp:
             # reject-not-precedence-resolve: no credential class accepts both
             return _error(
                 400,
@@ -171,25 +172,25 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                     # impersonation-root, so an unset or typo'd
                     # webui_source_ips must refuse it, never widen it.
                     allowed = runtime.settings.webui_source_ips
-                    client_ip = request.client.host if request.client else None
+                    client_ip = _client_ip(request)
                     if not allowed or client_ip not in allowed:
                         logger.warning(
                             f"webui act-as token used from unauthorized source {client_ip}"
                         )
                         return _error(403, "webui token not valid from this source")
-                    if not x_tn:
+                    if not x_user:
                         return _error(400, "webui act-as requires X-Teilnehmer")
-                    user_value = canonical_user(x_tn)
+                    user_value = canonical_user(x_user)
                     identity = Identity(
                         kind="webui-act-as",
                         actor=static_env.name,
                         effective_user=user_value,
                         webui_user=x_webui_user,
-                        raw_user_header=x_tn,
+                        raw_user_header=x_user,
                         roles=roles,
                     )
                     environment = environment_for_user(user_value, runtime.mapping.view)
-                elif x_tn or x_imp or x_webui_user:
+                elif x_user or x_imp or x_webui_user:
                     return _error(
                         403, "identity headers not allowed for this credential"
                     )
@@ -204,12 +205,10 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             else:
                 user = await verify_key(runtime.store, api_key)
                 if user is None:
-                    if limiter.hit(
-                        "auth", request.client.host if request.client else "?"
-                    ):
+                    if limiter.hit("auth", _client_ip(request) or "?"):
                         return _error(429, "rate limited")
                     return _error(401, "Unauthorized")
-                if x_tn or x_imp or x_webui_user:
+                if x_user or x_imp or x_webui_user:
                     return _error(403, "identity headers not allowed for API keys")
                 identity = Identity(kind="tn-key", actor=user, effective_user=user)
                 environment = environment_for_user(user, runtime.mapping.view)
@@ -226,13 +225,13 @@ class IdentityMiddleware(BaseHTTPMiddleware):
                 claims = await runtime.oidc.validate(bearer)
             except Exception as e:
                 logger.info(f"OIDC validation failed: {e}")
-                if limiter.hit("auth", request.client.host if request.client else "?"):
+                if limiter.hit("auth", _client_ip(request) or "?"):
                     return _error(429, "rate limited")
                 return _error(401, "Unauthorized")
             is_admin = runtime.oidc.is_admin(claims)
             sub = claims["sub"]
             username = claims.get(oidc_settings.username_claim, sub)
-            if x_tn:
+            if x_user:
                 return _error(403, "X-Teilnehmer not allowed with OIDC")
             if x_webui_user:
                 return _error(403, "X-Webui-User not allowed with OIDC")
@@ -317,14 +316,8 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             # and ensure X-API-Key exists for creds that didn't carry one — the
             # upstream endpoints require the header, its value is ignored (the
             # environment comes from the contextvar).
-            _strip = {
-                b"x-teilnehmer",
-                b"x-impersonate-teilnehmer",
-                b"x-webui-user",
-                b"authorization",
-            }
             headers = [
-                (k, v) for k, v in request.scope["headers"] if k.lower() not in _strip
+                (k, v) for k, v in request.scope["headers"] if k.lower() not in _STRIP
             ]
             if not any(k.lower() == b"x-api-key" for k, _ in headers):
                 headers.append((b"x-api-key", b"inberlin-contextvar"))
@@ -335,7 +328,9 @@ class IdentityMiddleware(BaseHTTPMiddleware):
             current_environment.reset(env_token)
 
 
-def _static_env_for_token(config, token: str):
+def _static_env_for_token(
+    config: ProxyConfig, token: str
+) -> ProxyConfigEnvironment | None:
     """Static environment whose sha512 matches the presented token, or None."""
     return config.token_env_map.get(sha512(token))
 

@@ -216,11 +216,9 @@ def check_pdns_metadata_allowed(environment: ProxyConfigEnvironment, zone: str) 
 
     try:
         return environment.get_zone_if_allowed(zone).metadata
-    except ZoneNotAllowedException:
-        pass
     except Exception:
-        # Parity with check_pdns_zone_allowed: a malformed zone regex must
-        # deny, not surface as a 500 from this route only.
+        # ZoneNotAllowedException, and — parity with check_pdns_zone_allowed —
+        # a malformed zone regex: both deny, never a 500 from this route only.
         pass
 
     return False

@@ -942,3 +942,14 @@ def test_journal_keeps_raw_identity_header(client):
     assert by_kind["webui-act-as"]["raw_user_header"] == "ALICE"
     assert by_kind["oidc"]["user"] == "alice"
     assert by_kind["oidc"]["raw_user_header"] == "Alice"
+
+
+def test_resolve_rejects_unknown_status_422(client):
+    # ResolveBody.status is Literal["committed", "failed"]: pydantic refuses
+    # anything else before the handler runs (standard body-validation 422)
+    r = client.post(
+        "/proxy/v1/journal/1/resolve",
+        headers={"X-API-Key": ADMIN_TOKEN},
+        json={"status": "pending"},
+    )
+    assert r.status_code == 422

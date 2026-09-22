@@ -23,6 +23,11 @@ class NotRollbackable(Exception):
     """Entry has no inverse (crypto/tsig/meta ops, or missing recorded state)."""
 
 
+def _record(r: dict) -> dict:
+    """The record fields a rollback restores and a drift check compares."""
+    return {"content": r["content"], "disabled": bool(r.get("disabled", False))}
+
+
 def _normalize_rrset(rrset: dict | None) -> dict | None:
     """Canonical comparable form (name canonicalized, records sorted) for drift checks."""
     if rrset is None:
@@ -32,10 +37,7 @@ def _normalize_rrset(rrset: dict | None) -> dict | None:
         "type": rrset["type"],
         "ttl": rrset.get("ttl"),
         "records": sorted(
-            (
-                {"content": r["content"], "disabled": bool(r.get("disabled", False))}
-                for r in rrset.get("records", [])
-            ),
+            (_record(r) for r in rrset.get("records", [])),
             key=lambda r: (r["content"], r["disabled"]),
         ),
     }
@@ -57,13 +59,7 @@ def inverse_rrsets(entry_rrsets: list[dict]) -> list[dict]:
                     "type": row["rtype"],
                     "changetype": "REPLACE",
                     "ttl": before.get("ttl"),
-                    "records": [
-                        {
-                            "content": r["content"],
-                            "disabled": bool(r.get("disabled", False)),
-                        }
-                        for r in before.get("records", [])
-                    ],
+                    "records": [_record(r) for r in before.get("records", [])],
                 }
             )
     return patch

@@ -108,6 +108,21 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _current_generation(c: sqlite3.Connection) -> int:
+    row = c.execute(
+        "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
+    ).fetchone()
+    return row["generation"] if row else 0
+
+
+def _check_generation(c: sqlite3.Connection, expected_generation: int) -> int:
+    """CAS guard: the current generation, or GenerationMismatch if stale."""
+    current = _current_generation(c)
+    if current != expected_generation:
+        raise GenerationMismatch(current)
+    return current
+
+
 def _bump_generation(
     c: sqlite3.Connection, expected_generation: int, actor: str, payload: dict
 ) -> tuple[int, str]:
@@ -115,13 +130,7 @@ def _bump_generation(
     row. Shared by mapping and override writes: both race the exporter's
     full-replace, so both CAS and bump the same sequence (docs/api-contract.md
     lines 36-42). Caller holds the write transaction."""
-    row = c.execute(
-        "SELECT generation FROM mapping_snapshot ORDER BY generation DESC LIMIT 1"
-    ).fetchone()
-    current = row["generation"] if row else 0
-    if current != expected_generation:
-        raise GenerationMismatch(current)
-    new_gen = current + 1
+    new_gen = _check_generation(c, expected_generation) + 1
     applied_at = _utcnow()
     c.execute(
         "INSERT INTO mapping_snapshot (generation, applied_at, actor, payload)"
@@ -312,13 +321,7 @@ class Store:
         the caller's view of the mapping is out of date either way."""
 
         def run(c: sqlite3.Connection) -> tuple[bool, int]:
-            row = c.execute(
-                "SELECT generation FROM mapping_snapshot"
-                " ORDER BY generation DESC LIMIT 1"
-            ).fetchone()
-            current = row["generation"] if row else 0
-            if current != expected_generation:
-                raise GenerationMismatch(current)
+            current = _check_generation(c, expected_generation)
             cur = c.execute("DELETE FROM override_grant WHERE id = ?", (override_id,))
             if cur.rowcount == 0:
                 return False, current

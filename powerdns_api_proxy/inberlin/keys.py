@@ -16,7 +16,7 @@ KEY_NAMESPACE = "inb"
 
 def sha512(value: str) -> str:
     """Hex sha512 of a token — the one hash helper for the whole extension
-    (static env lookup and TN keys share the upstream token model)."""
+    (static env lookup and User keys share the upstream token model)."""
     return hashlib.sha512(value.encode()).hexdigest()
 
 

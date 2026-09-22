@@ -14,6 +14,7 @@ from powerdns_api_proxy.inberlin.settings import (
     load_inberlin_settings,
 )
 from powerdns_api_proxy.inberlin.store import Store
+from powerdns_api_proxy.models import ProxyConfig
 from powerdns_api_proxy.logging import logger
 
 
@@ -124,7 +125,9 @@ def get_runtime() -> Runtime | None:
     return _runtime
 
 
-def roles_vs_environments_error(settings, config=None) -> str | None:
+def roles_vs_environments_error(
+    settings: InBerlinSettings, config: ProxyConfig | None = None
+) -> str | None:
     """Describe an environment_roles key that names no configured environment.
 
     settings.py rejects unknown role VALUES, but an unknown KEY is the more
@@ -151,7 +154,7 @@ def roles_vs_environments_error(settings, config=None) -> str | None:
     )
 
 
-def assert_roles_match_environments(settings) -> None:
+def assert_roles_match_environments(settings: InBerlinSettings) -> None:
     """Startup form of roles_vs_environments_error: refuse to start on mismatch."""
     problem = roles_vs_environments_error(settings)
     if problem:
