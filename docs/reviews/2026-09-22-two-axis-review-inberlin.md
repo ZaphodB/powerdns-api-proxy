@@ -15,7 +15,7 @@ minting; `webui_source_ips` fail-closed; member metadata admin-only; register
 not restricted to in-berlin.de).
 
 Items fixed or refuted in `2026-07-25-two-axis-review-inberlin.md` were not
-re-reported. Status of every finding below: **open, not fixed**.
+re-reported. Resolutions are listed at the end.
 
 ## Standards (12 judgement calls)
 
@@ -99,3 +99,20 @@ Standards: 12 judgement calls, worst S5 (dead `IDENTITY_HEADERS` + header
 list triplicated — the next header added will miss one copy). Spec: 10
 findings, no security gap; worst P5 (plan's "never silently ignored" rule
 broken for `X-Webui-User`).
+
+## Resolution (same day)
+
+| Finding | Commit | Result |
+|---|---|---|
+| P6–P10, S10 | `2a0e198` | Docs and comments corrected to match code and owner decisions |
+| P5 | `31981e0` | `X-Webui-User` on static / tn-key / OIDC → 403 (behavior change) |
+| P2 | `d535cb1` | `auto_vacuum=INCREMENTAL` (existing DBs converted by one VACUUM on open); prune runs `incremental_vacuum` |
+| P1 | `7ce523e` | New journal column `raw_user_header` (added by `ALTER TABLE` on open); in list view |
+| S1–S8, S11, S12 | `24d000e` | Refactors; one wire change: invalid resolve `status` → 422 (was 400) |
+| P3 | — | Not fixed: snapshot and entries are written in one transaction, so a startup cross-check guards nothing that can happen |
+| P4 | — | Nothing to do |
+| S9 | — | Not fixed: renaming test files is churn with no behavior value |
+
+Suite: 325 unit tests green after the last commit. Deploy-relevant: P5, P2
+(first start runs a VACUUM on the state DB), P1 (schema migration), and the
+resolve 422 — all need a redeploy of ans0 at a new `pdns_api_proxy_ref`.
