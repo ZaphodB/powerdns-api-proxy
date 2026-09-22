@@ -21,6 +21,8 @@ exactly like upstream.
   endpoints, error shapes, and what `/api/v1` changes.
 - [Authentication and authorization flow](docs/authz-flow.md): how each
   request is resolved to one identity and one set of zones.
+- [Configuration](docs/configuration.md): the `inberlin:` block, every
+  field, and which changes need a restart.
 - [Reviews](docs/reviews/): findings from code reviews of this branch and
   how each was resolved.
 
