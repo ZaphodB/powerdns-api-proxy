@@ -11,12 +11,12 @@ credentials`. None → `401`.
 | class | transport | who |
 |---|---|---|
 | `static` | `X-API-Key` matching a YAML environment `token_sha512` | infra, admin, mapping-exporter, metrics, **webui** |
-| `webui-act-as` | `static` env with `act_as: true` **+** `X-Teilnehmer: <name>` (+ optional `X-Webui-User`) | web UI acting for an htpasswd-authenticated User |
+| `webui-act-as` | `static` env with role `webui` (`inberlin.environment_roles`) **+** `X-Teilnehmer: <name>` (+ optional `X-Webui-User`) | web UI acting for an htpasswd-authenticated User |
 | `oidc` | `Authorization: Bearer <JWT>` (authentik access token) | admins now, User later |
 | `tn-key` | `X-API-Key` matching a hashed per-User key in SQLite | member automation (ACME, octoDNS) |
 
 `X-API-Key` lookup order: static env map first (config-defined, sha512), then
-`tn-key` store. A `static` env without `act_as` carrying `X-Teilnehmer` or
+`tn-key` store. A `static` env without the `webui` role carrying `X-Teilnehmer` or
 `X-Impersonate-Teilnehmer` → `403` (never ignored). `tn-key` carrying either
 header → `403`. Duplicate identity headers → `400`.
 
@@ -27,7 +27,8 @@ request
   │ 1. credential resolution (IdentityMiddleware)
   │    - collect: X-API-Key?, Authorization: Bearer?, X-Teilnehmer?,
   │      X-Impersonate-Teilnehmer?, X-Webui-User?
-  │    - >1 credential class → 400; none → 401 (except /proxy/v1/health, /)
+  │    - >1 credential class → 400; none → 401 (except /, /proxy/v1/health,
+  │      /health/pdns, /metrics)
   │ 2. authentication
   │    - static: sha512(token) in config.token_env_map
   │    - tn-key: sha512(key) in api_key store (constant-time, prefix-indexed,
@@ -49,8 +50,8 @@ request
   │      (owner decision 2026-07-25; supersedes the earlier subzones-only grant)
   │    - EXCEPT zone metadata: not granted to members (no metadata=True), it is
   │      an infra knob (ALLOW-AXFR-FROM, ENABLE-LUA-RECORDS); admins get
-  │      global_metadata=True. Open decision — flip in authz.py if members
-  │      should own it too. NOTE the grant is all-or-nothing per zone: the
+  │      global_metadata=True. Owner decision 2026-07-26: admin-only for now
+  │      (revisit later — flip in authz.py only with a kind allowlist). NOTE the grant is all-or-nothing per zone: the
   │      proxy does no kind-level policy, it inherits pdns's own table
   │      (ws-auth.cc isValidMetadataKind — LUA-AXFR-SCRIPT/NSEC3PARAM/
   │      PRESIGNED/SOA-EDIT read-only, API-RECTIFY/ENABLE-LUA-RECORDS/

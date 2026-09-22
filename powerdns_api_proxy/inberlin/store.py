@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS journal (
   zone TEXT NOT NULL,
   method TEXT NOT NULL,
   path TEXT NOT NULL,
-  operation TEXT NOT NULL,       -- rrset-patch|zone-create|zone-delete|zone-meta|crypto|tsig|other
+  operation TEXT NOT NULL,       -- rrset-patch|zone-create|zone-delete|zone-meta|zone-metadata|crypto|tsig|other
   raw_request TEXT,
   before_state TEXT,
   after_state TEXT,

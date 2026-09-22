@@ -89,8 +89,8 @@ class InBerlinSettings(BaseModel):
     # Global cap across ALL act-as mutations (contains a compromised/buggy UI
     # backend; per-member limits are fairness, not a security boundary).
     rate_limit_webui_global_mutations_per_minute: int = 600
-    # If non-empty, the webui act-as token is only accepted from these client
-    # IPs. On the wg overlay, source IPs are enforced by cryptokey routing
+    # The webui act-as token is only accepted from these client IPs; EMPTY
+    # refuses it entirely (fail-closed, a deploy requirement). On the wg overlay, source IPs are enforced by cryptokey routing
     # (peers cannot spoof each other), so this binds the token to the UI host.
     webui_source_ips: list[str] = []
 

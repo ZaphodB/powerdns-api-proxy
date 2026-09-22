@@ -9,7 +9,8 @@ records, subzone create, zone delete, DNSSEC keys (owner decision 2026-07-25,
 docs/authz-flow.md §4); only unrelated apexes are denied. Zone METADATA is the
 one deliberate exception: members do not get it (ALLOW-AXFR-FROM,
 ENABLE-LUA-RECORDS and friends are IN-Berlin infrastructure knobs, not zone
-content) — pending an owner decision, add metadata=True below to reverse.
+content) — owner decision 2026-07-26: admin-only for now; granting it needs
+a kind allowlist first (docs/authz-flow.md §4).
 Admin OIDC identities get a wildcard admin environment, metadata included.
 
 The synthesized environment is placed in the current_environment contextvar;

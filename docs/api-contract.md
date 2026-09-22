@@ -5,7 +5,12 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
 
 ## Auth classes
 
-- **ADM** — OIDC Bearer with `admin_group`, or static env with `admin: true` capability
+Static environments get their class from `inberlin.environment_roles`
+(`{<env name>: [<role>...]}`, roles `admin` | `exporter` | `webui` | `metrics` |
+`registrar`; unknown role names fail config load). A static env with no role
+is a plain upstream environment, untouched by the extension.
+
+- **ADM** — OIDC Bearer with `admin_group`, or a static env with role `admin`
 - **TN** — effective User. Two sub-classes:
   - **TN-session** — webui act-as (`X-Teilnehmer`) or OIDC. Full member surface:
     DNS ops, journal read, rollback, key mint/list/revoke.
@@ -14,8 +19,8 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
     key minting require a session (a compromised automation key must not be able
     to audit history, undo changes, or mint more keys). Endpoints below marked
     **TN-session** reject a `tn-key` with 403.
-- **EXP** — static `mapping-exporter` env (capability: mapping endpoints only)
-- **REG** — static registrar env (capability: `/proxy/v1/register` ONLY —
+- **EXP** — static env with role `exporter` (capability: mapping endpoints only)
+- **REG** — static env with role `registrar` (capability: `/proxy/v1/register` ONLY —
   create-only by construction: no `/api/v1`, no reads, no mutation of existing
   zones; pdns's unconditional 409 on duplicate zone create is the backstop).
   The registrable NAMESPACE is deliberately unrestricted: this endpoint serves
@@ -26,10 +31,10 @@ PowerDNS-API compatible; everything new lives under `/proxy/v1`.
   Enforced by an explicit credential gate: REG, EXP and MET are refused on
   `/api/v1` with `403 credential not allowed on the PowerDNS API`, rather
   than relying on the environment having an empty zone list
-- **MET** — static metrics env
+- **MET** — static env with role `metrics`
 
-Impersonation: `X-Impersonate-Teilnehmer` — ADM only, journaled with both
-identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
+Impersonation: `X-Impersonate-Teilnehmer` — OIDC admins only (a static admin
+env sending it gets `403`), journaled with both identities. `X-Webui-User` — htpasswd login behind the webui token, journaled.
 
 The webui act-as token is additionally **bound to configured source IPs**
 (`webui_source_ips`): on the WireGuard overlay, cryptokey routing makes peer
@@ -43,8 +48,8 @@ traffic on top of per-member limits.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| PUT | `/proxy/v1/mapping` | EXP/ADM | full replace `{"mapping": {"<tn>": ["zone."...]}}`; header `If-Match: <generation>` required, `409` mismatch; returns `{generation}` |
-| PATCH | `/proxy/v1/mapping` | EXP/ADM | `{"add": {...}, "remove": {...}}`; `If-Match` required |
+| PUT | `/proxy/v1/mapping` | EXP/ADM | full replace `{"mapping": {"<tn>": ["zone."...]}}`; header `If-Match: <generation>` required, `409` mismatch; returns `{generation, orphaned_overrides}` |
+| PATCH | `/proxy/v1/mapping` | EXP/ADM | `{"add": {...}, "remove": {...}}`; `If-Match` required; returns `{generation, orphaned_overrides}` |
 | GET | `/proxy/v1/mapping` | ADM | `{generation, applied_at, mapping}` |
 | GET | `/proxy/v1/mapping/self` | TN | own zone list incl. override grants |
 | GET | `/proxy/v1/overrides` | ADM | list |
@@ -74,8 +79,20 @@ PowerDNS-style body `{"error": "<detail>"}`:
 - `400` ambiguous/duplicate credentials, conflicting identity headers (X-Teilnehmer + X-Impersonate-Teilnehmer), missing If-Match
 - `401` no/invalid credential
 - `403` credential class not allowed for endpoint/header, zone not owned, TN scope
-- `409` mapping/override generation mismatch; rollback drift
-- `503` journal unwritable (fail-closed; mutation NOT forwarded)
+- `404` unknown journal entry/override/key; extension disabled on `/proxy/v1`
+- `409` mapping/override generation mismatch; duplicate override; rollback drift;
+  entry not rollbackable/not pending; zone owned or exists (register); key limit;
+  concurrent reload
+- `422` mapping assigns one zone to two Users
+- `429` rate limited (auth failures per IP, mutations per User, webui global cap)
+- `501` registration template not configured
+- `502` upstream unreachable/rejected during rollback drift check, rollback or
+  register zone create
+- `503` journal unwritable (fail-closed; mutation NOT forwarded); upstream
+  unreachable where the proxy must verify state first (register)
+
+Unauthenticated paths: `/`, `/proxy/v1/health`, `/health/pdns`, `/metrics`
+(the last has its own HTTP Basic auth, see above).
 
 ## `/api/v1` compatibility matrix
 
