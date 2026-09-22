@@ -142,11 +142,17 @@ class Store:
         self._conn_lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # INCREMENTAL so journal_prune can hand freed pages back to the
+        # filesystem. The pragma only takes effect on a fresh file; a database
+        # created before it (auto_vacuum still NONE) needs one VACUUM to convert.
+        self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        if self._conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            self._conn.execute("VACUUM")
         self._local = threading.local()
         # executor threads outlive the Store (and tests create many Stores) —
         # track read connections so close() can release them deterministically
@@ -608,7 +614,20 @@ class Store:
             )
             return cur.rowcount
 
-        return await self._write(run)
+        deleted = await self._write(run)
+        await self._incremental_vacuum()
+        return deleted
+
+    async def _incremental_vacuum(self) -> None:
+        """Release the free pages a prune left behind (plan §A: prune +
+        incremental vacuum), so the file and the size gauge actually shrink."""
+        async with self._write_lock:
+
+            def run():
+                with self._conn_lock:
+                    self._conn.execute("PRAGMA incremental_vacuum").fetchall()
+
+            await asyncio.to_thread(run)
 
     async def db_size_bytes(self) -> int:
         def run(c: sqlite3.Connection) -> int:

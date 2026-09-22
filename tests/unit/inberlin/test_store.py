@@ -280,3 +280,59 @@ def test_mapping_and_override_updates_serialized(store):
     assert gen == state.view.generation == 3
     assert applied_at == state.view.applied_at
     assert overrides == {"ov.example.": "bob"}
+
+
+def _auto_vacuum_mode(path) -> int:
+    c = sqlite3.connect(path)
+    try:
+        return c.execute("PRAGMA auto_vacuum").fetchone()[0]
+    finally:
+        c.close()
+
+
+def test_new_store_uses_incremental_auto_vacuum(store):
+    assert _auto_vacuum_mode(store.path) == 2  # INCREMENTAL
+
+
+def test_existing_store_converted_to_incremental_auto_vacuum(tmp_path):
+    # a DB created before auto_vacuum was set (e.g. ans0's) must be converted
+    # on open: the pragma alone is a no-op on a non-empty database
+    path = str(tmp_path / "legacy.sqlite")
+    legacy = sqlite3.connect(path)
+    legacy.execute("CREATE TABLE junk (x)")
+    legacy.commit()
+    legacy.close()
+    assert _auto_vacuum_mode(path) == 0
+    s = Store(path)
+    s.close()
+    assert _auto_vacuum_mode(path) == 2
+
+
+def test_journal_prune_returns_space_to_the_filesystem(store):
+    # plan §A: prune + incremental vacuum — the DB file (and the
+    # inberlin_journal_db_bytes gauge) must shrink after a prune
+    for _ in range(200):
+        jid = run(
+            store.journal_intent(
+                Identity(kind="static", actor="x"),
+                zone=".",
+                method="POST",
+                path="/p",
+                operation="other",
+                raw_request="x" * 4000,
+                before_state=None,
+            )
+        )
+        run(
+            store.journal_finalize(
+                jid,
+                status="committed",
+                status_code=200,
+                after_state=None,
+                rollbackable=False,
+            )
+        )
+    before = run(store.db_size_bytes())
+    assert run(store.journal_prune(0)) == 200
+    after = run(store.db_size_bytes())
+    assert after < before / 4
