@@ -8,6 +8,22 @@ There is the possibility to define multiple tokens. Each token is represented by
 A `environment` can get access to one or more zones.
 Within a zone, the token can be limited to one or more records.
 
+## IN-Berlin fork (branch `inberlin`)
+
+This branch adds a member ("Teilnehmer") DNS self-service layer on top of the
+upstream proxy: per-member zone ownership from a mapping, web UI act-as, OIDC,
+personal API keys, a write-ahead journal with rollback, and domain
+registration. It lives in `powerdns_api_proxy/inberlin/` and is switched on by
+an `inberlin:` block in the config file. Without that block the proxy behaves
+exactly like upstream.
+
+- [API contract](docs/api-contract.md): credential classes, the `/proxy/v1`
+  endpoints, error shapes, and what `/api/v1` changes.
+- [Authentication and authorization flow](docs/authz-flow.md): how each
+  request is resolved to one identity and one set of zones.
+- [Reviews](docs/reviews/): findings from code reviews of this branch and
+  how each was resolved.
+
 ## Usage
 
 ### Container
